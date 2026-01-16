@@ -1,0 +1,24 @@
+# Minimal pyproject.toml for test dependencies only.
+# The `work` script remains a standalone uv script with inline metadata.
+# Run tests with: uv run --extra test pytest
+
+[project]
+name = "work-tests"
+version = "0.0.0"
+description = "Test dependencies for the work CLI"
+requires-python = ">=3.11"
+# No runtime dependencies - work script has its own inline deps
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8.0",
+    "pytest-mock>=3.12",
+    # Include work's runtime deps so tests can import the script
+    "click>=8.0",
+    "tomli>=2.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-v"
