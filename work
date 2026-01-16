@@ -792,7 +792,7 @@ def spawn_in_new_tab(issue: str) -> None:
 def spawn_resume_iterm2(session_id: str, worktree_path: Path, worker_id: int) -> None:
     """Spawn a new iTerm2 tab resuming a Claude session."""
     # Set environment variables and resume the session
-    cmd = f"cd '{worktree_path}' && WORK_WORKER_ID={worker_id} WORK_DB_PATH='{config.db_path}' claude --resume {session_id}"
+    cmd = f"cd '{worktree_path}' && WORK_WORKER_ID={worker_id} WORK_DB_PATH='{config.db_path}' claude --dangerously-skip-permissions --resume {session_id}"
 
     applescript = f'''
 tell application "iTerm2"
@@ -812,7 +812,7 @@ def spawn_resume_wsl(session_id: str, worktree_path: Path, worker_id: int) -> No
     distro = os.environ.get("WSL_DISTRO_NAME", "Ubuntu")
     shell = os.path.basename(os.environ.get("SHELL", "/bin/bash"))
 
-    cmd = f"cd '{worktree_path}' && WORK_WORKER_ID={worker_id} WORK_DB_PATH='{config.db_path}' claude --resume {session_id}"
+    cmd = f"cd '{worktree_path}' && WORK_WORKER_ID={worker_id} WORK_DB_PATH='{config.db_path}' claude --dangerously-skip-permissions --resume {session_id}"
 
     # Find wt.exe
     import glob
@@ -1989,7 +1989,7 @@ def cmd_resume(issues: tuple, here: bool):
 
                 # Change to worktree and exec claude --resume
                 os.chdir(worktree_path)
-                os.execvp("claude", ["claude", "--resume", session_id])
+                os.execvp("claude", ["claude", "--dangerously-skip-permissions", "--resume", session_id])
             else:
                 # Spawn in new tab
                 # Note: pid tracking won't work for spawned tabs, but we still mark as resumed
@@ -2005,7 +2005,7 @@ def cmd_resume(issues: tuple, here: bool):
                 db_reset_worker_for_resume(worker_id, os.getpid())
                 os.chdir(worktree_path)
                 # Use --continue to pick up most recent session in that directory
-                os.execvp("claude", ["claude", "--continue"])
+                os.execvp("claude", ["claude", "--dangerously-skip-permissions", "--continue"])
             else:
                 # For new tabs without session, spawn work --here to restart
                 db_reset_worker_for_resume(worker_id, 0)
@@ -2025,7 +2025,7 @@ def spawn_continue_in_new_tab(worktree_path: Path, worker_id: int) -> None:
         )
 
     if method == "iterm2":
-        cmd = f"cd '{worktree_path}' && WORK_WORKER_ID={worker_id} WORK_DB_PATH='{config.db_path}' claude --continue"
+        cmd = f"cd '{worktree_path}' && WORK_WORKER_ID={worker_id} WORK_DB_PATH='{config.db_path}' claude --dangerously-skip-permissions --continue"
         applescript = f'''
 tell application "iTerm2"
     tell current window
@@ -2040,7 +2040,7 @@ end tell
     elif method == "wsl":
         distro = os.environ.get("WSL_DISTRO_NAME", "Ubuntu")
         shell = os.path.basename(os.environ.get("SHELL", "/bin/bash"))
-        cmd = f"cd '{worktree_path}' && WORK_WORKER_ID={worker_id} WORK_DB_PATH='{config.db_path}' claude --continue"
+        cmd = f"cd '{worktree_path}' && WORK_WORKER_ID={worker_id} WORK_DB_PATH='{config.db_path}' claude --dangerously-skip-permissions --continue"
 
         import glob
         wt_paths = glob.glob("/mnt/c/Users/*/AppData/Local/Microsoft/WindowsApps/wt.exe")
