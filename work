@@ -1027,13 +1027,14 @@ Read CLAUDE.md first for project conventions, test commands, and labels.
 {jira_instructions}
 ## Workflow
 
-1. **Implement**: Read requirements{jira_phase1_note}, plan, code, test locally, commit
-2. **Self-review**: Run `work --review` (required before PR creation)
-3. **Create PR**: `{gh_cli} pr create{repo_flag}`
-4. **CI loop**: `{gh_cli} pr checks --watch{repo_flag}` - fix failures, push fixes
-5. **Merge**: Requires approval + `work --review --pre-merge`, then `{gh_cli} pr merge --squash{repo_flag}`
-6. **Follow-up**: Create issues for TODOs, deferred feedback, or gaps identified
-7. **Done**: Run `work --done` and summarize what was accomplished
+1. **Plan**: Use EnterPlanMode to explore the codebase and create an implementation plan before writing code
+2. **Implement**: Read requirements{jira_phase1_note}, code, test locally, commit
+3. **Self-review**: Run `work --review` (required before PR creation)
+4. **Create PR**: `{gh_cli} pr create{repo_flag}`
+5. **CI loop**: `{gh_cli} pr checks --watch{repo_flag}` - fix failures, push fixes
+6. **Merge**: Requires approval + `work --review --pre-merge`, then `{gh_cli} pr merge --squash{repo_flag}`
+7. **Follow-up**: Create issues for TODOs, deferred feedback, or gaps identified
+8. **Done**: Run `work --done` and summarize what was accomplished
 
 ## Key Rules
 - NEVER merge without an approving review (not just "Requested")
