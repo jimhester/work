@@ -2387,10 +2387,10 @@ def run_here(input_str: str, description: Optional[str] = None):
                 check=True
             )
         else:
-            # Create new branch from main
+            # Create new branch from remote main (fetch already done above)
             click.echo(f"Creating worktree with new branch: {branch_name}")
             subprocess.run(
-                ["git", "worktree", "add", "-b", branch_name, str(worktree_path), config.main_branch],
+                ["git", "worktree", "add", "-b", branch_name, str(worktree_path), f"origin/{config.main_branch}"],
                 check=True
             )
 
