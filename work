@@ -163,6 +163,40 @@ VALID_STAGES = [
 ]
 
 
+# Context management instructions for worker prompt
+CONTEXT_MANAGEMENT_INSTRUCTIONS = """
+## Context Management
+
+Your context window has limited capacity. Quality degrades around 60% usage,
+and auto-compaction (lossy) triggers at 95%.
+
+### Monitoring
+- Status line shows current context percentage
+- You'll receive system reminders at 60%, 75%, and 85%
+
+### Actions
+
+**At 60%+** - Consider `/trim` if you notice degraded responses:
+```
+/trim
+```
+This removes large old tool outputs while preserving decisions and recent work.
+Can free 30-50% of context. Use multiple times if needed.
+
+**At 75%+ or trim ineffective** - Use `/rollover`:
+```
+/rollover
+```
+This starts a fresh session with your handoff summary. Full context is
+preserved in episodic-memory for retrieval.
+
+### Priority Order
+1. `/trim` - Least disruptive, stay in session
+2. `/rollover` - Clean handoff, fresh context
+3. Auto-compaction - Last resort (lossy, avoid if possible)
+"""
+
+
 # =============================================================================
 # Context Management Utilities
 # =============================================================================
@@ -1399,7 +1433,7 @@ Read CLAUDE.md first for project conventions, test commands, and labels.
 - NEVER claim "tests pass" without running them and reading output
 - If blocked waiting for human review: `work --stage blocked` and wait
 - Check messages periodically: `work --messages`
-{worker_guidelines_section}"""
+{CONTEXT_MANAGEMENT_INSTRUCTIONS}{worker_guidelines_section}"""
 
 
 def generate_plan_prompt(plan_path: str, gh_cli: str) -> str:
