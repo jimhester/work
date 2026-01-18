@@ -34,7 +34,33 @@ Map superpowers skills to workflow steps:
 | Address feedback | `receiving-code-review` |
 | Merge | `finishing-a-development-branch` |
 
-### 2. No changes to
+### 2. Add `work --plan <file>` command
+
+Execute plan files directly with smooth workflow from planning to implementation:
+
+```bash
+work --plan docs/plans/2026-01-18-my-feature.md
+```
+
+**Flow:**
+1. Validate plan file exists
+2. Extract branch name from plan filename (e.g., `plan/my-feature`)
+3. Create worktree from `origin/main`
+4. Get plan into worktree:
+   - If committed: cherry-pick the plan commit
+   - If uncommitted: copy file and commit in worktree
+5. Spawn worker with plan-specific prompt referencing `superpowers:executing-plans`
+
+**Why not just embed in prompt?**
+- Plan in prompt loses context in long conversations
+- Worker can't re-read the plan when needed
+- Having a file allows worker to reference specific sections
+
+**Flexibility:**
+- Committed plans: cherry-picked (preserves git history)
+- Uncommitted plans: copied and committed in worktree (works for hand-written or in-progress plans)
+
+### 3. No changes to
 
 - `work --review` (keep as gate)
 - Hooks (stage detection unchanged)

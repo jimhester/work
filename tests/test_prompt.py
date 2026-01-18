@@ -303,3 +303,102 @@ class TestFetchFunctionsWithRepo:
         mock_run.assert_called_once()
         cmd = mock_run.call_args[0][0]
         assert cmd == ["gh", "pr", "view", "123", "--json", "headRefName", "--repo", "owner/repo"]
+
+
+class TestGeneratePlanPrompt:
+    """Tests for generate_plan_prompt function."""
+
+    def test_plan_prompt_contains_plan_path(self, monkeypatch):
+        """Plan prompt should reference the plan file path."""
+        monkeypatch.setattr(work, "load_work_config", lambda: work.WorkConfig())
+
+        prompt = work.generate_plan_prompt("docs/plans/2026-01-18-my-feature.md", "gh")
+
+        assert "docs/plans/2026-01-18-my-feature.md" in prompt
+
+    def test_plan_prompt_has_execute_instruction(self, monkeypatch):
+        """Plan prompt should instruct to execute the plan."""
+        monkeypatch.setattr(work, "load_work_config", lambda: work.WorkConfig())
+
+        prompt = work.generate_plan_prompt("docs/plans/test.md", "gh")
+
+        assert "Execute the implementation plan" in prompt
+
+    def test_plan_prompt_includes_superpowers_skills(self, monkeypatch):
+        """Plan prompt should reference superpowers skills."""
+        monkeypatch.setattr(work, "load_work_config", lambda: work.WorkConfig())
+
+        prompt = work.generate_plan_prompt("docs/plans/test.md", "gh")
+
+        assert "superpowers:executing-plans" in prompt
+        assert "superpowers:test-driven-development" in prompt
+        assert "superpowers:verification-before-completion" in prompt
+
+    def test_plan_prompt_uses_gh_cli(self, monkeypatch):
+        """Plan prompt should use the specified GitHub CLI."""
+        monkeypatch.setattr(work, "load_work_config", lambda: work.WorkConfig())
+
+        prompt_gh = work.generate_plan_prompt("docs/plans/test.md", "gh")
+        prompt_ghe = work.generate_plan_prompt("docs/plans/test.md", "ghe")
+
+        assert "gh pr create" in prompt_gh
+        assert "ghe pr create" in prompt_ghe
+
+    def test_plan_prompt_includes_worker_guidelines(self, monkeypatch):
+        """Plan prompt should include worker guidelines from config."""
+        config = work.WorkConfig(
+            worker_guidelines="Always run linter before committing"
+        )
+        monkeypatch.setattr(work, "load_work_config", lambda: config)
+
+        prompt = work.generate_plan_prompt("docs/plans/test.md", "gh")
+
+        assert "Always run linter before committing" in prompt
+
+
+class TestExtractPlanName:
+    """Tests for extract_plan_name function."""
+
+    def test_extracts_name_from_dated_filename(self):
+        """Should remove date prefix from plan filename."""
+        name = work.extract_plan_name("docs/plans/2026-01-18-pipelined-parquet-writer.md")
+        assert name == "pipelined-parquet-writer"
+
+    def test_handles_filename_without_date(self):
+        """Should handle filenames without date prefix."""
+        name = work.extract_plan_name("docs/plans/my-feature.md")
+        assert name == "my-feature"
+
+    def test_handles_nested_paths(self):
+        """Should work with nested paths."""
+        name = work.extract_plan_name("docs/plans/2026-01-18-feature/plan.md")
+        assert name == "plan"
+
+    def test_handles_simple_filename(self):
+        """Should handle simple filenames."""
+        name = work.extract_plan_name("plan.md")
+        assert name == "plan"
+
+
+class TestGetPlanCommit:
+    """Tests for get_plan_commit function."""
+
+    def test_returns_none_for_uncommitted_file(self, mocker):
+        """Should return None if file is not committed."""
+        mock_run = mocker.patch.object(work.subprocess, "run")
+        mock_run.return_value.stdout = ""
+        mock_run.return_value.returncode = 0
+
+        result = work.get_plan_commit("docs/plans/uncommitted.md")
+
+        assert result is None
+
+    def test_returns_commit_sha(self, mocker):
+        """Should return commit SHA for committed file."""
+        mock_run = mocker.patch.object(work.subprocess, "run")
+        mock_run.return_value.stdout = "abc123def456\n"
+        mock_run.return_value.returncode = 0
+
+        result = work.get_plan_commit("docs/plans/committed.md")
+
+        assert result == "abc123def456"

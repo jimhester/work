@@ -1073,6 +1073,119 @@ Read CLAUDE.md first for project conventions, test commands, and labels.
 {worker_guidelines_section}"""
 
 
+def generate_plan_prompt(plan_path: str, gh_cli: str) -> str:
+    """Generate prompt for executing a plan file.
+
+    Args:
+        plan_path: Path to the plan file (relative to repo root)
+        gh_cli: GitHub CLI command to use (gh or ghe)
+    """
+    work_config = load_work_config()
+
+    worker_guidelines_section = ""
+    if work_config.worker_guidelines.strip():
+        worker_guidelines_section = f"\n{work_config.worker_guidelines}"
+
+    return f"""Execute the implementation plan at `{plan_path}`.
+
+Read CLAUDE.md first for project conventions, test commands, and labels.
+
+## Workflow
+
+### 1. Read and Understand the Plan
+- Read the plan file thoroughly: `{plan_path}`
+- Understand the goals, tasks, and expected outcomes
+- Identify any dependencies between tasks
+
+### 2. Execute Tasks
+- Follow `superpowers:executing-plans` for batch execution with checkpoints
+- Use `superpowers:test-driven-development` strictly: RED -> GREEN -> REFACTOR
+- If you hit bugs: use `superpowers:systematic-debugging` (investigate before fixing)
+- Request code review between major steps: `superpowers:requesting-code-review`
+
+### 3. Verify & Self-Review
+- Use `superpowers:verification-before-completion` - run ALL tests, read output, confirm passing
+- Only after verification passes: run `work --review` (required gate for PR creation)
+
+### 4. Create PR
+- `{gh_cli} pr create`
+- Reference the plan in the PR description
+
+### 5. CI Loop
+- `{gh_cli} pr checks --watch` - wait for CI
+- If failures: debug with `superpowers:systematic-debugging`, fix, push, repeat
+
+### 6. Address Review Feedback
+- Use `superpowers:receiving-code-review` - technical rigor, not blind agreement
+- After changes: run `superpowers:verification-before-completion` again
+
+### 7. Merge
+- Requires approval (not just "Requested")
+- Run `work --review --pre-merge` (final gate)
+- Use `superpowers:finishing-a-development-branch` for merge decision
+- `{gh_cli} pr merge --squash`
+
+### 8. Follow-up & Done
+- Create issues for TODOs, deferred feedback, or gaps identified
+- Run `work --done` and summarize what was accomplished
+
+## Key Rules
+- NEVER merge without an approving review
+- NEVER claim "tests pass" without running them and reading output
+- If blocked waiting for human review: `work --stage blocked` and wait
+- Check messages periodically: `work --messages`
+{worker_guidelines_section}"""
+
+
+def get_plan_commit(plan_path: str) -> Optional[str]:
+    """Get the commit SHA that last modified the plan file.
+
+    Returns None if the file is not committed.
+    """
+    result = subprocess.run(
+        ["git", "log", "-1", "--format=%H", "--", plan_path],
+        capture_output=True, text=True
+    )
+    if result.returncode == 0 and result.stdout.strip():
+        return result.stdout.strip()
+    return None
+
+
+def cherry_pick_commit(commit_sha: str, worktree_path: Path) -> bool:
+    """Cherry-pick a commit into a worktree.
+
+    Returns True if successful, False otherwise.
+    """
+    result = subprocess.run(
+        ["git", "-C", str(worktree_path), "cherry-pick", "--no-commit", commit_sha],
+        capture_output=True, text=True
+    )
+    if result.returncode != 0:
+        click.echo(f"Warning: Cherry-pick failed: {result.stderr}", err=True)
+        return False
+
+    # Commit the cherry-picked changes
+    result = subprocess.run(
+        ["git", "-C", str(worktree_path), "commit", "-m", f"Import plan from {commit_sha[:8]}"],
+        capture_output=True, text=True
+    )
+    return result.returncode == 0
+
+
+def extract_plan_name(plan_path: str) -> str:
+    """Extract a branch-friendly name from a plan file path.
+
+    Example: docs/plans/2026-01-18-pipelined-parquet-writer.md -> pipelined-parquet-writer
+    """
+    # Get filename without extension
+    filename = Path(plan_path).stem
+
+    # Remove date prefix if present (YYYY-MM-DD-)
+    name = re.sub(r'^\d{4}-\d{2}-\d{2}-', '', filename)
+
+    return name or filename
+
+
 # =============================================================================
 # CLI Commands
 # =============================================================================
@@ -1103,10 +1216,12 @@ Read CLAUDE.md first for project conventions, test commands, and labels.
 @click.option('--resume', 'do_resume', is_flag=True, help='Resume crashed/stopped worker(s)')
 @click.option('--cleanup', 'do_cleanup', is_flag=True, help='Find and kill orphaned claude processes')
 @click.option('--force', 'force', is_flag=True, help='Skip confirmation prompts (for --cleanup)')
+@click.option('--plan', 'plan_file', type=click.Path(exists=True), help='Execute a plan file in a new worker')
 @click.pass_context
 def cli(ctx, issues, here, show_status, show_events, show_logs, do_stop, do_send,
         show_messages, peek, quiet, set_stage, mark_done, set_pr, log_event, transition, msg_type,
-        do_init, no_ai, do_review, pre_merge, dry_run, show_reviews, do_resume, do_cleanup, force):
+        do_init, no_ai, do_review, pre_merge, dry_run, show_reviews, do_resume, do_cleanup, force,
+        plan_file):
     """
     Start Claude Code session(s) for GitHub issue(s) or JIRA tickets.
 
@@ -1117,6 +1232,7 @@ def cli(ctx, issues, here, show_status, show_events, show_logs, do_stop, do_send
       work --here 42 "fix memory leak"  # Run in current terminal
       work "add dark mode support"      # New feature branch
       work AIE-123                       # JIRA issue
+      work --plan docs/plans/my-plan.md # Execute a plan file
 
     \b
     Config & Review:
@@ -1165,6 +1281,10 @@ def cli(ctx, issues, here, show_status, show_events, show_logs, do_stop, do_send
 
     if do_cleanup:
         cmd_cleanup(force)
+        return
+
+    if plan_file:
+        cmd_plan(plan_file, here)
         return
 
     # Handle management commands
@@ -2032,6 +2152,199 @@ def cmd_cleanup(force: bool = False):
                     click.echo(f"Force killed PID {p['pid']}")
             except (OSError, ProcessLookupError):
                 pass
+
+
+def copy_plan_to_worktree(source_path: Path, relative_path: Path, worktree_path: Path) -> bool:
+    """Copy a plan file to the worktree and commit it.
+
+    Args:
+        source_path: Absolute path to the source plan file
+        relative_path: Path relative to repo root (for destination)
+        worktree_path: Path to the worktree
+
+    Returns True if successful.
+    """
+    import shutil
+
+    dest_path = worktree_path / relative_path
+    dest_path.parent.mkdir(parents=True, exist_ok=True)
+
+    try:
+        shutil.copy2(source_path, dest_path)
+    except Exception as e:
+        click.echo(f"Warning: Could not copy plan file: {e}", err=True)
+        return False
+
+    # Stage and commit the plan file
+    result = subprocess.run(
+        ["git", "-C", str(worktree_path), "add", str(relative_path)],
+        capture_output=True, text=True
+    )
+    if result.returncode != 0:
+        click.echo(f"Warning: Could not stage plan file: {result.stderr}", err=True)
+        return False
+
+    result = subprocess.run(
+        ["git", "-C", str(worktree_path), "commit", "-m", f"docs: Add plan {relative_path.name}"],
+        capture_output=True, text=True
+    )
+    if result.returncode != 0:
+        click.echo(f"Warning: Could not commit plan file: {result.stderr}", err=True)
+        return False
+
+    return True
+
+
+def cmd_plan(plan_file: str, here: bool = False):
+    """Execute a plan file in a new worker."""
+    repo_root = get_repo_root()
+    if not repo_root:
+        raise click.ClickException("Not in a git repository")
+
+    plan_path = Path(plan_file)
+    absolute_plan_path = plan_path.resolve()
+
+    # Verify file exists
+    if not absolute_plan_path.exists():
+        raise click.ClickException(f"Plan file not found: {plan_file}")
+
+    # Make path relative to repo root for consistency
+    try:
+        relative_plan_path = absolute_plan_path.relative_to(repo_root)
+    except ValueError:
+        raise click.ClickException(f"Plan file must be within the repository: {plan_file}")
+
+    # Check if plan is committed
+    plan_commit = get_plan_commit(str(relative_plan_path))
+    if plan_commit:
+        click.echo(f"Found plan commit: {plan_commit[:8]}")
+    else:
+        click.echo("Plan file not committed - will copy to worktree")
+
+    # Extract branch name from plan filename
+    plan_name = extract_plan_name(str(relative_plan_path))
+    branch_name = f"plan/{plan_name}"
+    click.echo(f"Branch name: {branch_name}")
+
+    # Use main repo name for worktree paths
+    repo_name = get_main_repo_name() or repo_root.name
+    gh_cli = detect_gh_cli()
+
+    # Find or create worktree
+    worktree_path = find_existing_worktree(branch_name)
+    if worktree_path:
+        click.echo(f"Using existing worktree: {worktree_path}")
+    else:
+        worktree_path = config.worktree_base / repo_name / branch_name.replace("/", "-")
+        worktree_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Fetch latest
+        subprocess.run(["git", "fetch", "--quiet"], capture_output=True)
+
+        # Create new branch from origin/main
+        click.echo(f"Creating worktree with new branch: {branch_name}")
+        result = subprocess.run(
+            ["git", "worktree", "add", "-b", branch_name, str(worktree_path), f"origin/{config.main_branch}"],
+            capture_output=True, text=True
+        )
+        if result.returncode != 0:
+            raise click.ClickException(f"Failed to create worktree: {result.stderr}")
+
+        # Get the plan into the worktree
+        if plan_commit:
+            # Cherry-pick the plan commit
+            click.echo(f"Cherry-picking plan commit {plan_commit[:8]}...")
+            if not cherry_pick_commit(plan_commit, worktree_path):
+                click.echo("Warning: Could not cherry-pick plan commit. Falling back to copy.")
+                copy_plan_to_worktree(absolute_plan_path, relative_plan_path, worktree_path)
+        else:
+            # Copy the uncommitted plan file
+            click.echo(f"Copying plan file to worktree...")
+            if not copy_plan_to_worktree(absolute_plan_path, relative_plan_path, worktree_path):
+                click.echo("Warning: Could not copy plan file. Plan may not be available.")
+
+    # Generate plan-specific prompt
+    prompt = generate_plan_prompt(str(relative_plan_path), gh_cli)
+
+    # Check if already in Claude Code
+    if os.environ.get("CLAUDE_CODE"):
+        click.echo("Already in Claude Code session. Here's the task prompt:")
+        click.echo("-" * 60)
+        click.echo(prompt)
+        return
+
+    # Set terminal title
+    title = f"Plan: {plan_name[:25]}"
+    sys.stdout.write(f"\033]0;{title}\007")
+    sys.stdout.flush()
+
+    # Register worker (use plan name as identifier)
+    init_db()
+    worker_id = db_register_worker(
+        repo=repo_name,
+        issue_number=None,  # No issue number for plans
+        branch=branch_name,
+        worktree=str(worktree_path),
+        pid=os.getpid() if here else 0,
+        issue_source="plan",
+        jira_key=plan_name,  # Use plan name as the lookup key
+    )
+
+    # Change to worktree and start Claude
+    os.chdir(worktree_path)
+    os.environ["WORK_WORKER_ID"] = str(worker_id)
+    os.environ["WORK_DB_PATH"] = str(config.db_path)
+
+    if here:
+        # Run in current terminal
+        os.execvp("claude", ["claude", "--dangerously-skip-permissions", prompt])
+    else:
+        # Spawn in new tab
+        spawn_in_new_tab_with_prompt(str(worktree_path), worker_id, prompt)
+
+
+def spawn_in_new_tab_with_prompt(worktree_path: str, worker_id: int, prompt: str) -> None:
+    """Spawn a worker in a new terminal tab with a specific prompt."""
+    import shlex
+
+    method = detect_spawn_method()
+    if not method:
+        raise click.ClickException("No supported terminal detected (iTerm2 or Windows Terminal required)")
+
+    # Escape the prompt for shell
+    escaped_prompt = shlex.quote(prompt)
+
+    if method == "iterm2":
+        cmd = f"cd '{worktree_path}' && WORK_WORKER_ID={worker_id} WORK_DB_PATH='{config.db_path}' claude --dangerously-skip-permissions {escaped_prompt}"
+        script = f'''
+        tell application "iTerm"
+            tell current window
+                create tab with default profile
+                tell current session
+                    write text "{cmd.replace('"', '\\"')}"
+                end tell
+            end tell
+        end tell
+        '''
+        subprocess.run(["osascript", "-e", script], check=True)
+    elif method == "wsl":
+        # Find Windows Terminal
+        wt_paths = [
+            "/mnt/c/Users/jhester/AppData/Local/Microsoft/WindowsApps/wt.exe",
+            "/mnt/c/Program Files/WindowsApps/Microsoft.WindowsTerminal_1.18.3181.0_x64__8wekyb3d8bbwe/wt.exe",
+        ]
+        wt_exe = next((p for p in wt_paths if Path(p).exists()), None)
+        if not wt_exe:
+            raise click.ClickException("Windows Terminal not found")
+
+        distro = subprocess.run(["wslvar", "WSL_DISTRO_NAME"], capture_output=True, text=True).stdout.strip() or "Ubuntu"
+        shell = os.environ.get("SHELL", "/bin/bash")
+        cmd = f"cd '{worktree_path}' && WORK_WORKER_ID={worker_id} WORK_DB_PATH='{config.db_path}' claude --dangerously-skip-permissions {escaped_prompt}"
+        subprocess.run([
+            wt_exe, "-w", "0", "nt",
+            "wsl.exe", "-d", distro, "--cd", str(worktree_path), "--",
+            shell, "-lic", cmd
+        ], check=True)
 
 
 def cmd_send(issue: str, message: str, msg_type: str = "info"):
