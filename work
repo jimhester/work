@@ -27,7 +27,7 @@ import sys
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Iterator
 
@@ -269,6 +269,9 @@ def trim_session_file(
     new_size = 0
 
     with open(input_file, "r") as infile, open(output_file, "w") as outfile:
+        # Reserve first line for metadata (will be written at the end)
+        lines_to_write = []
+
         for line_num, line in enumerate(infile, start=1):
             original_size += len(line)
 
@@ -297,18 +300,34 @@ def trim_session_file(
                                         trimmed_count += 1
 
                 new_line = json.dumps(data) + "\n"
-                outfile.write(new_line)
+                lines_to_write.append(new_line)
                 new_size += len(new_line)
 
             except json.JSONDecodeError:
-                outfile.write(line)
+                lines_to_write.append(line)
                 new_size += len(line)
+
+        # Write trim_metadata as first line
+        trim_metadata = {
+            "trim_metadata": {
+                "parent_file": parent_file,
+                "trimmed_at": datetime.now(timezone.utc).isoformat(),
+                "threshold": threshold,
+                "trimmed_count": trimmed_count,
+            }
+        }
+        metadata_line = json.dumps(trim_metadata) + "\n"
+        outfile.write(metadata_line)
+        new_size += len(metadata_line)
+
+        # Write all the processed lines
+        for line in lines_to_write:
+            outfile.write(line)
 
     return {
         "trimmed_count": trimmed_count,
-        "original_size": original_size,
-        "new_size": new_size,
-        "bytes_saved": original_size - new_size,
+        "original_chars": original_size,
+        "trimmed_chars": new_size,
     }
 
 

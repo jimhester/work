@@ -92,13 +92,50 @@ class TestTrimSession:
 
         assert output_file.exists()
         assert stats["trimmed_count"] >= 1
+        # Verify return dict uses correct keys per spec
+        assert "original_chars" in stats
+        assert "trimmed_chars" in stats
+        assert "bytes_saved" not in stats
 
-        # Verify content was truncated
+        # Verify content was truncated (skip first line which is metadata)
         with open(output_file) as f:
-            for line in f:
+            lines = f.readlines()
+            for line in lines[1:]:  # Skip trim_metadata line
                 data = json.loads(line)
                 if data.get("type") == "user":
                     content = data.get("message", {}).get("content", [])
                     for item in content:
                         if item.get("type") == "tool_result":
                             assert len(str(item.get("content", ""))) < 1000
+
+    def test_trim_session_writes_metadata_first_line(self, tmp_path):
+        """Should write trim_metadata as the first line of output file."""
+        session_file = tmp_path / "session.jsonl"
+        lines = [
+            json.dumps({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "tool-1", "name": "Read"}]}}),
+            json.dumps({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "tool-1", "content": "x" * 1000}]}}),
+        ]
+        session_file.write_text("\n".join(lines) + "\n")
+
+        output_file = tmp_path / "trimmed.jsonl"
+        work.trim_session_file(
+            input_file=session_file,
+            output_file=output_file,
+            threshold=500,
+            target_tools={"Read"},
+        )
+
+        # Read first line and verify it's trim_metadata
+        with open(output_file) as f:
+            first_line = f.readline()
+            metadata = json.loads(first_line)
+
+        assert "trim_metadata" in metadata
+        tm = metadata["trim_metadata"]
+        assert "parent_file" in tm
+        assert str(session_file.absolute()) in tm["parent_file"]
+        assert "trimmed_at" in tm
+        assert "threshold" in tm
+        assert tm["threshold"] == 500
+        assert "trimmed_count" in tm
+        assert tm["trimmed_count"] >= 1
