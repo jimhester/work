@@ -1680,37 +1680,109 @@ def cmd_reviews(ref: str = "HEAD") -> None:
     click.echo(result.stdout)
 
 
+def _status_icon(stage: str, status: str) -> tuple[str, int]:
+    """Return (icon, sort_priority) for a worker based on stage/status.
+
+    Lower sort_priority = shown first (needs attention).
+    """
+    # Failed/blocked - needs immediate attention
+    if stage in ('blocked', 'merge_conflicts') or status == 'failed':
+        return ('✗', 0)
+    # Waiting states - needs attention but not urgent
+    if stage in ('review_waiting', 'ci_waiting', 'review_responding'):
+        return ('⏳', 1)
+    # Done - show last
+    if stage == 'done' or status == 'done':
+        return ('✓', 3)
+    # Active - working normally
+    return ('●', 2)
+
+
+def _format_activity(mins_idle: int, stage: str, status: str) -> str:
+    """Format activity time for display."""
+    if stage == 'done' or status == 'done':
+        if mins_idle < 1:
+            return "just now"
+        elif mins_idle < 60:
+            return f"{mins_idle}m ago"
+        else:
+            hours = mins_idle // 60
+            return f"{hours}h ago"
+    elif mins_idle < 2:
+        return "active"
+    elif mins_idle < 60:
+        return f"{mins_idle}m idle"
+    else:
+        hours = mins_idle // 60
+        return f"{hours}h idle"
+
+
 def cmd_status():
     """Show status of all active workers."""
     init_db()
     db_cleanup_stale_workers()
 
-    click.echo("Active Workers:")
-    click.echo("-" * 85)
-    click.echo(f"{'repo_name':<20} | {'issue':<12} | {'status':<10} | {'stage':<17} | mins_idle")
-    click.echo("-" * 85)
-
     with get_db() as conn:
+        # Fetch all workers (including recently done)
         cursor = conn.execute("""
             SELECT repo_name,
+                   branch,
                    COALESCE(jira_key, CAST(issue_number AS TEXT), '-') as issue,
                    status,
                    COALESCE(stage, phase) as stage,
+                   COALESCE(pr_number, 0) as pr_number,
                    CAST((julianday('now') - julianday(updated_at)) * 24 * 60 AS INTEGER) as mins_idle
             FROM workers
             WHERE status NOT IN ('done', 'failed')
+               OR (status IN ('done', 'failed')
+                   AND julianday('now') - julianday(updated_at) < 1)
             ORDER BY updated_at DESC
         """)
-        for row in cursor:
-            click.echo(f"{row['repo_name']:<20} | {row['issue']:<12} | {row['status']:<10} | {row['stage']:<17} | {row['mins_idle']}")
+        workers = cursor.fetchall()
 
-        cursor = conn.execute(
-            "SELECT COUNT(*) as count FROM workers WHERE status NOT IN ('done', 'failed')"
+    if not workers:
+        click.echo("No active workers.")
+        return
+
+    # Sort by priority (needs attention first, then active, then done)
+    sorted_workers = sorted(
+        workers,
+        key=lambda w: (
+            _status_icon(w['stage'], w['status'])[1],
+            -w['mins_idle'] if w['stage'] == 'done' else w['mins_idle']
         )
-        count = cursor.fetchone()["count"]
+    )
 
-    click.echo("-" * 85)
-    click.echo(f"Total active workers: {count}")
+    # Count by category
+    blocked = sum(1 for w in workers if _status_icon(w['stage'], w['status'])[1] == 0)
+    waiting = sum(1 for w in workers if _status_icon(w['stage'], w['status'])[1] == 1)
+    active = sum(1 for w in workers if _status_icon(w['stage'], w['status'])[1] == 2)
+    done = sum(1 for w in workers if _status_icon(w['stage'], w['status'])[1] == 3)
+
+    # Display
+    for row in sorted_workers:
+        icon, _ = _status_icon(row['stage'], row['status'])
+        issue = f"#{row['issue']}" if row['issue'] != '-' else '-'
+        pr = f"PR #{row['pr_number']}" if row['pr_number'] else "—"
+        stage = row['stage'] or '-'
+        activity = _format_activity(row['mins_idle'], row['stage'], row['status'])
+        # Truncate branch name for display
+        branch = row['branch'][:20] if row['branch'] else '-'
+
+        click.echo(f"{icon}  {issue:<8} {branch:<20} {pr:<10} {stage:<17} {activity}")
+
+    # Summary line
+    click.echo()
+    parts = []
+    if active:
+        parts.append(f"{active} active")
+    if waiting:
+        parts.append(f"{waiting} waiting")
+    if blocked:
+        parts.append(f"{blocked} blocked")
+    if done:
+        parts.append(f"{done} done")
+    click.echo(f"{len(workers)} workers: {', '.join(parts)}")
 
 
 def cmd_events(issue: Optional[str] = None):
