@@ -25,6 +25,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -329,6 +330,44 @@ def trim_session_file(
         "original_chars": original_size,
         "trimmed_chars": new_size,
     }
+
+
+def find_current_session_file() -> Optional[Path]:
+    """
+    Find the most recent Claude session file in ~/.claude/projects/.
+    Returns the path to the most recently modified .jsonl file, or None if not found.
+    """
+    claude_projects = Path.home() / ".claude" / "projects"
+    if not claude_projects.exists():
+        return None
+
+    # Find all .jsonl files in projects directory
+    session_files = list(claude_projects.glob("**/*.jsonl"))
+    if not session_files:
+        return None
+
+    # Return the most recently modified file
+    return max(session_files, key=lambda p: p.stat().st_mtime)
+
+
+def update_session_id_in_file(file_path: Path, new_session_id: str) -> None:
+    """
+    Update sessionId in all lines of a session file.
+    Modifies the file in place.
+    """
+    lines = []
+    with open(file_path, "r") as f:
+        for line in f:
+            try:
+                data = json.loads(line.strip())
+                if "sessionId" in data:
+                    data["sessionId"] = new_session_id
+                lines.append(json.dumps(data) + "\n")
+            except json.JSONDecodeError:
+                lines.append(line)
+
+    with open(file_path, "w") as f:
+        f.writelines(lines)
 
 
 # =============================================================================
@@ -1477,11 +1516,12 @@ def extract_plan_name(plan_path: str) -> str:
 @click.option('--cleanup', 'do_cleanup', is_flag=True, help='Find and kill orphaned claude processes')
 @click.option('--force', 'force', is_flag=True, help='Skip confirmation prompts (for --cleanup)')
 @click.option('--plan', 'plan_file', type=click.Path(exists=True), help='Execute a plan file in a new worker')
+@click.option('--trim', 'do_trim', is_flag=True, help='Trim current session context (requires worker env)')
 @click.pass_context
 def cli(ctx, issues, here, show_status, show_events, show_logs, do_stop, do_send,
         show_messages, peek, quiet, set_stage, mark_done, set_pr, log_event, transition, msg_type,
         do_init, no_ai, do_review, pre_merge, dry_run, show_reviews, do_resume, do_cleanup, force,
-        plan_file):
+        plan_file, do_trim):
     """
     Start Claude Code session(s) for GitHub issue(s) or JIRA tickets.
 
@@ -1545,6 +1585,13 @@ def cli(ctx, issues, here, show_status, show_events, show_logs, do_stop, do_send
 
     if plan_file:
         cmd_plan(plan_file, here)
+        return
+
+    if do_trim:
+        worker_id = os.environ.get("WORK_WORKER_ID")
+        if not worker_id:
+            raise click.ClickException("--trim can only be used within a worker session (WORK_WORKER_ID not set)")
+        cmd_trim(worker_id)
         return
 
     # Handle management commands
@@ -2605,6 +2652,55 @@ def spawn_in_new_tab_with_prompt(worktree_path: str, worker_id: int, prompt: str
             "wsl.exe", "-d", distro, "--cd", str(worktree_path), "--",
             shell, "-lic", cmd
         ], check=True)
+
+
+def cmd_trim(worker_id: str) -> None:
+    """Trim current session context and restart with fresh session ID."""
+    work_config = load_work_config()
+
+    # 1. Sync to episodic-memory (best effort)
+    click.echo("Syncing to episodic-memory...")
+    subprocess.run(
+        ["claude", "mcp", "run", "episodic-memory", "sync", "-y"],
+        check=False,
+        capture_output=True
+    )
+
+    # 2. Find current session file
+    session_file = find_current_session_file()
+    if not session_file:
+        raise click.ClickException("Could not find current session file")
+
+    click.echo(f"Found session file: {session_file}")
+
+    # 3. Generate new session ID
+    new_session_id = str(uuid.uuid4())
+    click.echo(f"New session ID: {new_session_id}")
+
+    # 4. Trim to temporary file
+    trimmed_file = session_file.with_suffix(".trimmed.jsonl")
+    stats = trim_session_file(
+        input_file=session_file,
+        output_file=trimmed_file,
+        threshold=work_config.context.trim_threshold_chars,
+        target_tools=set(work_config.context.trim_target_tools),
+    )
+
+    click.echo(f"Trimmed {stats['trimmed_count']} tool outputs")
+    click.echo(f"Size: {stats['original_chars']:,} -> {stats['trimmed_chars']:,} chars")
+
+    # 5. Update session IDs in trimmed file
+    update_session_id_in_file(trimmed_file, new_session_id)
+
+    # 6. Rename to final location (new session ID)
+    final_file = session_file.parent / f"{new_session_id}.jsonl"
+    trimmed_file.rename(final_file)
+    click.echo(f"Created: {final_file}")
+
+    # 7. Print resume command
+    click.echo("")
+    click.echo("To resume with trimmed context:")
+    click.echo(f"  claude --resume {new_session_id}")
 
 
 def cmd_send(issue: str, message: str, msg_type: str = "info"):

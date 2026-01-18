@@ -139,3 +139,16 @@ class TestTrimSession:
         assert tm["threshold"] == 500
         assert "trimmed_count" in tm
         assert tm["trimmed_count"] >= 1
+
+
+class TestTrimCommand:
+    """Tests for the --trim CLI command."""
+
+    def test_trim_command_requires_worker_env(self):
+        """Should error when WORK_WORKER_ID is not set."""
+        from click.testing import CliRunner
+
+        runner = CliRunner()
+        result = runner.invoke(work.cli, ["--trim"], env={"WORK_WORKER_ID": ""})
+        assert result.exit_code != 0
+        assert "worker session" in result.output.lower() or "WORK_WORKER_ID" in result.output
