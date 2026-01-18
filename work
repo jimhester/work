@@ -2671,6 +2671,7 @@ def cmd_plan(plan_file: str, here: bool = False):
         issue_source="plan",
         jira_key=plan_name,  # Use plan name as the lookup key
     )
+    db_create_session(worker_id=worker_id, session_number=1)
 
     # Change to worktree and start Claude
     os.chdir(worktree_path)
@@ -3430,6 +3431,7 @@ def run_here(input_str: str, description: Optional[str] = None):
         jira_key,
         issue_source
     )
+    db_create_session(worker_id=worker_id, session_number=1)
     db_log_event(worker_id, "started", f"Worker started for {task_ref}")
     db_update_status(worker_id, "running", "implementation")
 

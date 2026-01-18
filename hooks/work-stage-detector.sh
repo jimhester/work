@@ -151,19 +151,11 @@ get_context_percentage() {
 
 inject_context_reminder() {
     local pct="$1"
-    local config_file
 
-    # Load thresholds from .work.toml if available
+    # Context reminder thresholds (hardcoded defaults)
     local warn_threshold=60
     local recommend_threshold=75
     local urgent_threshold=85
-
-    config_file="$(git rev-parse --show-toplevel 2>/dev/null)/.work.toml"
-    if [[ -f "$config_file" ]]; then
-        warn_threshold=$(grep -E '^warn_threshold\s*=' "$config_file" 2>/dev/null | sed 's/.*=\s*//' | tr -d ' ' || echo 60)
-        recommend_threshold=$(grep -E '^recommend_threshold\s*=' "$config_file" 2>/dev/null | sed 's/.*=\s*//' | tr -d ' ' || echo 75)
-        urgent_threshold=$(grep -E '^urgent_threshold\s*=' "$config_file" 2>/dev/null | sed 's/.*=\s*//' | tr -d ' ' || echo 85)
-    fi
 
     if [[ $pct -ge $urgent_threshold ]]; then
         echo "<system-reminder>Context at ${pct}%. Use /trim or /rollover now to avoid lossy auto-compaction at 95%.</system-reminder>"
@@ -176,7 +168,7 @@ inject_context_reminder() {
 
 # Rate-limit context checks (every 60 seconds)
 check_context_with_rate_limit() {
-    local check_file="/tmp/work-context-check-$$"
+    local check_file="/tmp/work-context-check-${WORK_WORKER_ID}"
     local now
     local last_check
     local check_interval=60
