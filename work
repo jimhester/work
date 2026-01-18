@@ -25,9 +25,10 @@ import sqlite3
 import subprocess
 import sys
 import time
+import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Iterator
 
@@ -58,6 +59,21 @@ config = Config()
 
 
 @dataclass
+class ContextConfig:
+    """Context management configuration."""
+    warn_threshold: int = 60
+    recommend_threshold: int = 75
+    urgent_threshold: int = 85
+    trim_threshold_chars: int = 500
+    trim_target_tools: list = None
+    check_interval_seconds: int = 60
+
+    def __post_init__(self):
+        if self.trim_target_tools is None:
+            self.trim_target_tools = ["Read", "Bash", "Grep", "Glob"]
+
+
+@dataclass
 class WorkConfig:
     """Project-specific work configuration from .work.toml."""
     worker_guidelines: str = ""
@@ -65,6 +81,7 @@ class WorkConfig:
     review_strictness: str = "normal"  # "strict", "normal", "lenient"
     require_pre_merge_review: bool = True
     review_exclude_patterns: list = None  # Files to exclude from review diff
+    context: ContextConfig = None  # Context management settings
 
     def __post_init__(self):
         if self.review_exclude_patterns is None:
@@ -80,6 +97,8 @@ class WorkConfig:
                 "poetry.lock",
                 "go.sum",
             ]
+        if self.context is None:
+            self.context = ContextConfig()
 
 
 def load_work_config() -> WorkConfig:
@@ -105,6 +124,16 @@ def load_work_config() -> WorkConfig:
                 # Override exclude patterns if specified in config
                 if "review_exclude_patterns" in data:
                     wc.review_exclude_patterns = data["review_exclude_patterns"]
+                # Load context config
+                context_data = data.get("context", {})
+                wc.context = ContextConfig(
+                    warn_threshold=context_data.get("warn_threshold", 60),
+                    recommend_threshold=context_data.get("recommend_threshold", 75),
+                    urgent_threshold=context_data.get("urgent_threshold", 85),
+                    trim_threshold_chars=context_data.get("trim_threshold_chars", 500),
+                    trim_target_tools=context_data.get("trim_target_tools"),
+                    check_interval_seconds=context_data.get("check_interval_seconds", 60),
+                )
                 return wc
             except Exception as e:
                 click.echo(f"Warning: Failed to parse {config_path}: {e}", err=True)
@@ -132,6 +161,278 @@ VALID_STAGES = [
     "ci_waiting", "review_waiting", "review_responding", "merge_conflicts",
     "done", "blocked"
 ]
+
+
+# Context management instructions for worker prompt
+CONTEXT_MANAGEMENT_INSTRUCTIONS = """
+## Context Management
+
+Your context window has limited capacity. Quality degrades around 60% usage,
+and auto-compaction (lossy) triggers at 95%.
+
+### Monitoring
+- Status line shows current context percentage
+- You'll receive system reminders at 60%, 75%, and 85%
+
+### Actions
+
+**At 60%+** - Consider `/trim` if you notice degraded responses:
+```
+/trim
+```
+This removes large old tool outputs while preserving decisions and recent work.
+Can free 30-50% of context. Use multiple times if needed.
+
+**At 75%+ or trim ineffective** - Use `/rollover`:
+```
+/rollover
+```
+This starts a fresh session with your handoff summary. Full context is
+preserved in episodic-memory for retrieval.
+
+### Priority Order
+1. `/trim` - Least disruptive, stay in session
+2. `/rollover` - Clean handoff, fresh context
+3. Auto-compaction - Last resort (lossy, avoid if possible)
+"""
+
+
+# =============================================================================
+# Context Management Utilities
+# =============================================================================
+
+def get_context_percentage_from_file(session_file: Path) -> Optional[int]:
+    """
+    Parse context percentage from a Claude session JSONL file.
+    Returns None if file doesn't exist or has no context metadata.
+    """
+    if not session_file.exists():
+        return None
+
+    try:
+        # Read file in reverse to find most recent metadata
+        with open(session_file, "r") as f:
+            lines = f.readlines()
+
+        for line in reversed(lines):
+            try:
+                data = json.loads(line.strip())
+                if "contextTokens" in data and "maxContextTokens" in data:
+                    context_tokens = data["contextTokens"]
+                    max_tokens = data["maxContextTokens"]
+                    if max_tokens > 0:
+                        return int((context_tokens / max_tokens) * 100)
+            except json.JSONDecodeError:
+                continue
+
+        return None
+    except Exception:
+        return None
+
+
+def truncate_content(
+    content: str,
+    threshold: int,
+    tool_name: str,
+    line_num: int,
+    parent_file: str,
+) -> str:
+    """
+    Truncate content if it exceeds threshold.
+    Keeps first N chars and adds reference to parent file.
+    """
+    if len(content) <= threshold:
+        return content
+
+    truncated = content[:threshold]
+    notice = (
+        f"\n\n[...truncated - original was {len(content):,} chars, "
+        f"showing first {threshold}. See line {line_num} of {parent_file} for full content]"
+    )
+
+    result = truncated + notice
+    # Only return truncated if it actually saves space
+    if len(result) >= len(content):
+        return content
+    return result
+
+
+def build_tool_name_mapping(session_file: Path) -> dict:
+    """
+    Build mapping of tool_use_id -> tool_name from session file.
+    First pass to enable identifying tool results by their tool name.
+    """
+    tool_map = {}
+
+    with open(session_file, "r") as f:
+        for line in f:
+            try:
+                data = json.loads(line.strip())
+                if data.get("type") == "assistant":
+                    content = data.get("message", {}).get("content", [])
+                    if isinstance(content, list):
+                        for item in content:
+                            if isinstance(item, dict) and item.get("type") == "tool_use":
+                                tool_id = item.get("id")
+                                tool_name = item.get("name")
+                                if tool_id and tool_name:
+                                    tool_map[tool_id] = tool_name
+            except json.JSONDecodeError:
+                continue
+
+    return tool_map
+
+
+def trim_session_file(
+    input_file: Path,
+    output_file: Path,
+    threshold: int = 500,
+    target_tools: set = None,
+) -> dict:
+    """
+    Trim large tool outputs from a Claude session file.
+    Returns stats about what was trimmed.
+    """
+    if target_tools is None:
+        target_tools = {"Read", "Bash", "Grep", "Glob"}
+
+    tool_map = build_tool_name_mapping(input_file)
+    parent_file = str(input_file.absolute())
+
+    trimmed_count = 0
+    original_size = 0
+    new_size = 0
+
+    with open(input_file, "r") as infile, open(output_file, "w") as outfile:
+        # Reserve first line for metadata (will be written at the end)
+        lines_to_write = []
+
+        for line_num, line in enumerate(infile, start=1):
+            original_size += len(line)
+
+            try:
+                data = json.loads(line.strip())
+
+                # Process user messages containing tool results
+                if data.get("type") == "user":
+                    content = data.get("message", {}).get("content", [])
+                    if isinstance(content, list):
+                        for item in content:
+                            if isinstance(item, dict) and item.get("type") == "tool_result":
+                                tool_use_id = item.get("tool_use_id")
+                                tool_name = tool_map.get(tool_use_id, "Unknown")
+
+                                if tool_name in target_tools:
+                                    result_content = item.get("content", "")
+                                    if isinstance(result_content, str) and len(result_content) > threshold:
+                                        item["content"] = truncate_content(
+                                            result_content,
+                                            threshold,
+                                            tool_name,
+                                            line_num,
+                                            parent_file,
+                                        )
+                                        trimmed_count += 1
+
+                new_line = json.dumps(data) + "\n"
+                lines_to_write.append(new_line)
+                new_size += len(new_line)
+
+            except json.JSONDecodeError:
+                lines_to_write.append(line)
+                new_size += len(line)
+
+        # Write trim_metadata as first line
+        trim_metadata = {
+            "trim_metadata": {
+                "parent_file": parent_file,
+                "trimmed_at": datetime.now(timezone.utc).isoformat(),
+                "threshold": threshold,
+                "trimmed_count": trimmed_count,
+            }
+        }
+        metadata_line = json.dumps(trim_metadata) + "\n"
+        outfile.write(metadata_line)
+        new_size += len(metadata_line)
+
+        # Write all the processed lines
+        for line in lines_to_write:
+            outfile.write(line)
+
+    return {
+        "trimmed_count": trimmed_count,
+        "original_chars": original_size,
+        "trimmed_chars": new_size,
+    }
+
+
+def find_current_session_file() -> Optional[Path]:
+    """
+    Find the most recent Claude session file in ~/.claude/projects/.
+    Returns the path to the most recently modified .jsonl file, or None if not found.
+    """
+    claude_projects = Path.home() / ".claude" / "projects"
+    if not claude_projects.exists():
+        return None
+
+    # Find all .jsonl files in projects directory
+    session_files = list(claude_projects.glob("**/*.jsonl"))
+    if not session_files:
+        return None
+
+    # Return the most recently modified file
+    return max(session_files, key=lambda p: p.stat().st_mtime)
+
+
+def update_session_id_in_file(file_path: Path, new_session_id: str) -> None:
+    """
+    Update sessionId in all lines of a session file.
+    Modifies the file in place.
+    """
+    lines = []
+    with open(file_path, "r") as f:
+        for line in f:
+            try:
+                data = json.loads(line.strip())
+                if "sessionId" in data:
+                    data["sessionId"] = new_session_id
+                lines.append(json.dumps(data) + "\n")
+            except json.JSONDecodeError:
+                lines.append(line)
+
+    with open(file_path, "w") as f:
+        f.writelines(lines)
+
+
+def build_continuation_prompt(
+    session_number: int,
+    issue_ref: str,
+    context_pct: int,
+    summary: str,
+    parent_session_path: str,
+    worker_id: str,
+) -> str:
+    """
+    Build a continuation prompt for session rollover.
+    Returns markdown-formatted handoff instructions.
+    """
+    return f"""## Session Continuation
+
+This is session #{session_number} for {issue_ref}.
+Previous session rolled over at {context_pct}% context to preserve quality.
+
+### Handoff Summary
+{summary}
+
+### Retrieving Details
+The full previous session is indexed in episodic-memory.
+Use the search tool to retrieve specific details, decisions, or code snippets as needed.
+
+### Lineage
+Parent session: {parent_session_path}
+Worker ID: {worker_id}
+"""
+
 
 # =============================================================================
 # Database Layer
@@ -188,12 +489,25 @@ CREATE TABLE IF NOT EXISTS messages (
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS sessions (
+    id INTEGER PRIMARY KEY,
+    worker_id INTEGER REFERENCES workers(id),
+    session_number INTEGER,
+    session_id TEXT,
+    started_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    ended_at TEXT,
+    end_reason TEXT,
+    context_at_end INTEGER,
+    summary TEXT
+);
+
 CREATE INDEX IF NOT EXISTS idx_workers_status ON workers(status);
 CREATE INDEX IF NOT EXISTS idx_workers_repo ON workers(repo_path);
 CREATE INDEX IF NOT EXISTS idx_events_worker ON events(worker_id);
 CREATE INDEX IF NOT EXISTS idx_events_time ON events(created_at);
 CREATE INDEX IF NOT EXISTS idx_messages_worker ON messages(worker_id);
 CREATE INDEX IF NOT EXISTS idx_messages_unread ON messages(worker_id, read_at);
+CREATE INDEX IF NOT EXISTS idx_sessions_worker ON sessions(worker_id);
 """
 
 
@@ -558,6 +872,55 @@ def db_get_message_count(worker_id: int) -> int:
             (worker_id,)
         )
         return cursor.fetchone()["count"]
+
+
+def db_create_session(
+    worker_id: int,
+    session_number: int,
+    claude_session_id: Optional[str] = None,
+) -> int:
+    """Create a new session record for a worker."""
+    with get_db() as conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO sessions (worker_id, session_number, session_id)
+            VALUES (?, ?, ?)
+            """,
+            (worker_id, session_number, claude_session_id),
+        )
+        return cursor.lastrowid
+
+
+def db_end_session(
+    session_id: int,
+    end_reason: str,
+    context_at_end: Optional[int] = None,
+    summary: Optional[str] = None,
+) -> None:
+    """Mark a session as ended with metadata."""
+    with get_db() as conn:
+        conn.execute(
+            """
+            UPDATE sessions
+            SET ended_at = CURRENT_TIMESTAMP,
+                end_reason = ?,
+                context_at_end = ?,
+                summary = ?
+            WHERE id = ?
+            """,
+            (end_reason, context_at_end, summary, session_id),
+        )
+
+
+def db_get_current_session_number(worker_id: int) -> int:
+    """Get the highest session number for a worker, or 0 if none."""
+    with get_db() as conn:
+        cursor = conn.execute(
+            "SELECT MAX(session_number) FROM sessions WHERE worker_id = ?",
+            (worker_id,),
+        )
+        result = cursor.fetchone()[0]
+        return result if result is not None else 0
 
 
 # =============================================================================
@@ -1070,7 +1433,7 @@ Read CLAUDE.md first for project conventions, test commands, and labels.
 - NEVER claim "tests pass" without running them and reading output
 - If blocked waiting for human review: `work --stage blocked` and wait
 - Check messages periodically: `work --messages`
-{worker_guidelines_section}"""
+{CONTEXT_MANAGEMENT_INSTRUCTIONS}{worker_guidelines_section}"""
 
 
 def generate_plan_prompt(plan_path: str, gh_cli: str) -> str:
@@ -1217,11 +1580,14 @@ def extract_plan_name(plan_path: str) -> str:
 @click.option('--cleanup', 'do_cleanup', is_flag=True, help='Find and kill orphaned claude processes')
 @click.option('--force', 'force', is_flag=True, help='Skip confirmation prompts (for --cleanup)')
 @click.option('--plan', 'plan_file', type=click.Path(exists=True), help='Execute a plan file in a new worker')
+@click.option('--trim', 'do_trim', is_flag=True, help='Trim current session context (requires worker env)')
+@click.option('--rollover', 'do_rollover', is_flag=True, help='Roll over to new session with handoff (requires worker env)')
+@click.option('--summary-file', 'summary_file', type=click.Path(exists=True), help='Path to summary text file (for --rollover)')
 @click.pass_context
 def cli(ctx, issues, here, show_status, show_events, show_logs, do_stop, do_send,
         show_messages, peek, quiet, set_stage, mark_done, set_pr, log_event, transition, msg_type,
         do_init, no_ai, do_review, pre_merge, dry_run, show_reviews, do_resume, do_cleanup, force,
-        plan_file):
+        plan_file, do_trim, do_rollover, summary_file):
     """
     Start Claude Code session(s) for GitHub issue(s) or JIRA tickets.
 
@@ -1285,6 +1651,22 @@ def cli(ctx, issues, here, show_status, show_events, show_logs, do_stop, do_send
 
     if plan_file:
         cmd_plan(plan_file, here)
+        return
+
+    if do_trim:
+        worker_id = os.environ.get("WORK_WORKER_ID")
+        if not worker_id:
+            raise click.ClickException("--trim can only be used within a worker session (WORK_WORKER_ID not set)")
+        cmd_trim(worker_id)
+        return
+
+    if do_rollover:
+        worker_id = os.environ.get("WORK_WORKER_ID")
+        if not worker_id:
+            raise click.ClickException("--rollover can only be used within a worker session (WORK_WORKER_ID not set)")
+        if not summary_file:
+            raise click.ClickException("--rollover requires --summary-file")
+        cmd_rollover(worker_id, Path(summary_file))
         return
 
     # Handle management commands
@@ -2290,6 +2672,7 @@ def cmd_plan(plan_file: str, here: bool = False):
         jira_key=plan_name,  # Use plan name as the lookup key
         issue_source="plan",
     )
+    db_create_session(worker_id=worker_id, session_number=1)
 
     # Change to worktree and start Claude
     os.chdir(worktree_path)
@@ -2344,6 +2727,160 @@ def spawn_in_new_tab_with_prompt(worktree_path: str, worker_id: int, prompt: str
             "wsl.exe", "-d", distro, "--cd", str(worktree_path), "--",
             shell, "-lic", cmd
         ], check=True)
+
+
+def cmd_trim(worker_id: str) -> None:
+    """Trim current session context and restart with fresh session ID."""
+    work_config = load_work_config()
+
+    # 1. Sync to episodic-memory (best effort)
+    click.echo("Syncing to episodic-memory...")
+    subprocess.run(
+        ["claude", "mcp", "run", "episodic-memory", "sync", "-y"],
+        check=False,
+        capture_output=True
+    )
+
+    # 2. Find current session file
+    session_file = find_current_session_file()
+    if not session_file:
+        raise click.ClickException("Could not find current session file")
+
+    click.echo(f"Found session file: {session_file}")
+
+    # 3. Generate new session ID
+    new_session_id = str(uuid.uuid4())
+    click.echo(f"New session ID: {new_session_id}")
+
+    # 4. Trim to temporary file
+    trimmed_file = session_file.with_suffix(".trimmed.jsonl")
+    stats = trim_session_file(
+        input_file=session_file,
+        output_file=trimmed_file,
+        threshold=work_config.context.trim_threshold_chars,
+        target_tools=set(work_config.context.trim_target_tools),
+    )
+
+    click.echo(f"Trimmed {stats['trimmed_count']} tool outputs")
+    click.echo(f"Size: {stats['original_chars']:,} -> {stats['trimmed_chars']:,} chars")
+
+    # 5. Update session IDs in trimmed file
+    update_session_id_in_file(trimmed_file, new_session_id)
+
+    # 6. Rename to final location (new session ID)
+    final_file = session_file.parent / f"{new_session_id}.jsonl"
+    trimmed_file.rename(final_file)
+    click.echo(f"Created: {final_file}")
+
+    # 7. Print resume command
+    click.echo("")
+    click.echo("To resume with trimmed context:")
+    click.echo(f"  claude --resume {new_session_id}")
+
+
+def cmd_rollover(worker_id: str, summary_file: Path) -> None:
+    """Roll over to a new session with handoff summary."""
+    import tempfile
+
+    # 1. Read summary from file
+    summary = summary_file.read_text().strip()
+    click.echo(f"Read summary from: {summary_file}")
+
+    # 2. Sync to episodic-memory (best effort)
+    click.echo("Syncing to episodic-memory...")
+    subprocess.run(
+        ["claude", "mcp", "run", "episodic-memory", "sync", "-y"],
+        check=False,
+        capture_output=True
+    )
+
+    # 3. Get worker info from database
+    init_db()
+    worker_id_int = int(worker_id)
+    with get_db() as conn:
+        cursor = conn.execute(
+            "SELECT issue_number, jira_key, repo_name FROM workers WHERE id=?",
+            (worker_id_int,)
+        )
+        row = cursor.fetchone()
+        if not row:
+            raise click.ClickException(f"Worker {worker_id} not found in database")
+
+        issue_number = row["issue_number"]
+        jira_key = row["jira_key"]
+        repo_name = row["repo_name"]
+
+    # Build issue reference
+    if jira_key:
+        issue_ref = jira_key
+    elif issue_number:
+        issue_ref = f"issue #{issue_number}"
+    else:
+        issue_ref = f"worker {worker_id}"
+
+    # 4. Get context percentage from current session file
+    session_file = find_current_session_file()
+    context_pct = 0
+    parent_session_path = ""
+    if session_file:
+        context_pct = get_context_percentage_from_file(session_file) or 0
+        parent_session_path = str(session_file)
+        click.echo(f"Current context: {context_pct}%")
+
+    # 5. End current session in DB
+    current_session_num = db_get_current_session_number(worker_id_int)
+    if current_session_num > 0:
+        # Get the session record ID to end it
+        with get_db() as conn:
+            cursor = conn.execute(
+                "SELECT id FROM sessions WHERE worker_id=? AND session_number=? AND ended_at IS NULL",
+                (worker_id_int, current_session_num)
+            )
+            session_row = cursor.fetchone()
+            if session_row:
+                db_end_session(
+                    session_id=session_row["id"],
+                    end_reason="rollover",
+                    context_at_end=context_pct,
+                    summary=summary
+                )
+                click.echo(f"Ended session #{current_session_num}")
+
+    # 6. Create new session record
+    new_session_num = current_session_num + 1
+    db_create_session(
+        worker_id=worker_id_int,
+        session_number=new_session_num,
+    )
+    click.echo(f"Created session #{new_session_num}")
+
+    # 7. Build continuation prompt
+    prompt = build_continuation_prompt(
+        session_number=new_session_num,
+        issue_ref=issue_ref,
+        context_pct=context_pct,
+        summary=summary,
+        parent_session_path=parent_session_path,
+        worker_id=worker_id,
+    )
+
+    # 8. Write prompt to temp file
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False) as f:
+        f.write(prompt)
+        prompt_file = f.name
+    click.echo(f"Wrote continuation prompt to: {prompt_file}")
+
+    # 9. Output instructions
+    click.echo("")
+    click.echo("=" * 60)
+    click.echo("SESSION ROLLOVER COMPLETE")
+    click.echo("=" * 60)
+    click.echo("")
+    click.echo("To continue in a new session, run:")
+    click.echo(f"  claude --prompt-file {prompt_file}")
+    click.echo("")
+    click.echo("Or to resume from the prompt manually, copy the content from:")
+    click.echo(f"  {prompt_file}")
 
 
 def cmd_send(issue: str, message: str, msg_type: str = "info"):
@@ -2893,6 +3430,7 @@ def run_here(input_str: str, description: Optional[str] = None):
         jira_key,
         issue_source
     )
+    db_create_session(worker_id=worker_id, session_number=1)
     db_log_event(worker_id, "started", f"Worker started for {task_ref}")
     db_update_status(worker_id, "running", "implementation")
 

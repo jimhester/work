@@ -402,3 +402,26 @@ class TestGetPlanCommit:
         result = work.get_plan_commit("docs/plans/committed.md")
 
         assert result == "abc123def456"
+
+
+class TestContextManagementInPrompt:
+    """Tests for context management instructions in worker prompt."""
+
+    def test_prompt_includes_context_management(self, monkeypatch):
+        """Should include context management section."""
+        monkeypatch.setattr(work, "load_work_config", lambda: work.WorkConfig())
+
+        prompt = work.generate_prompt("Fix bug #42", "gh")
+
+        assert "Context Management" in prompt
+        assert "/trim" in prompt
+        assert "/rollover" in prompt
+
+    def test_prompt_mentions_thresholds(self, monkeypatch):
+        """Should mention context thresholds."""
+        monkeypatch.setattr(work, "load_work_config", lambda: work.WorkConfig())
+
+        prompt = work.generate_prompt("Fix bug #42", "gh")
+
+        assert "60%" in prompt or "60" in prompt
+        assert "auto-compaction" in prompt.lower() or "95%" in prompt

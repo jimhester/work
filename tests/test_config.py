@@ -125,3 +125,48 @@ review_exclude_patterns = ["*.generated.ts", "vendor/*"]
         assert config.worker_guidelines == ""  # defaults
         captured = capsys.readouterr()
         assert "Warning" in captured.err or "Failed to parse" in captured.err
+
+
+class TestContextConfig:
+    """Tests for context management configuration."""
+
+    def test_default_context_thresholds(self):
+        """Should have sensible default thresholds."""
+        config = work.ContextConfig()
+        assert config.warn_threshold == 60
+        assert config.recommend_threshold == 75
+        assert config.urgent_threshold == 85
+
+    def test_default_trim_settings(self):
+        """Should have default trim settings."""
+        config = work.ContextConfig()
+        assert config.trim_threshold_chars == 500
+        assert "Read" in config.trim_target_tools
+        assert "Bash" in config.trim_target_tools
+
+    def test_load_context_config_from_file(self, tmp_path, monkeypatch):
+        """Should load context config from .work.toml."""
+        config_file = tmp_path / ".work.toml"
+        config_file.write_text('''
+[context]
+warn_threshold = 50
+recommend_threshold = 70
+urgent_threshold = 80
+trim_threshold_chars = 300
+''')
+        monkeypatch.setattr(work, "get_repo_root", lambda: tmp_path)
+
+        config = work.load_work_config()
+        assert config.context.warn_threshold == 50
+        assert config.context.recommend_threshold == 70
+        assert config.context.urgent_threshold == 80
+        assert config.context.trim_threshold_chars == 300
+
+    def test_context_config_defaults_when_not_in_file(self, tmp_path, monkeypatch):
+        """Should use defaults when [context] section missing."""
+        config_file = tmp_path / ".work.toml"
+        config_file.write_text('worker_guidelines = "test"')
+        monkeypatch.setattr(work, "get_repo_root", lambda: tmp_path)
+
+        config = work.load_work_config()
+        assert config.context.warn_threshold == 60
