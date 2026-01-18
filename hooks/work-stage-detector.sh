@@ -135,4 +135,68 @@ fi
 # This ensures workers receive messages in a timely manner
 "$WORK_SCRIPT" --messages --quiet 2>&1 || true
 
+# =============================================================================
+# Context Monitoring
+# =============================================================================
+
+get_context_percentage() {
+    # Source status line script if available for context percentage
+    local statusline_script="${HOME}/.claude/scripts/work-statusline.sh"
+    if [[ -f "$statusline_script" ]]; then
+        # shellcheck source=/dev/null
+        source "$statusline_script" 2>/dev/null
+        echo "${CONTEXT_PCT:-}"
+    fi
+}
+
+inject_context_reminder() {
+    local pct="$1"
+    local config_file
+
+    # Load thresholds from .work.toml if available
+    local warn_threshold=60
+    local recommend_threshold=75
+    local urgent_threshold=85
+
+    config_file="$(git rev-parse --show-toplevel 2>/dev/null)/.work.toml"
+    if [[ -f "$config_file" ]]; then
+        warn_threshold=$(grep -E '^warn_threshold\s*=' "$config_file" 2>/dev/null | sed 's/.*=\s*//' | tr -d ' ' || echo 60)
+        recommend_threshold=$(grep -E '^recommend_threshold\s*=' "$config_file" 2>/dev/null | sed 's/.*=\s*//' | tr -d ' ' || echo 75)
+        urgent_threshold=$(grep -E '^urgent_threshold\s*=' "$config_file" 2>/dev/null | sed 's/.*=\s*//' | tr -d ' ' || echo 85)
+    fi
+
+    if [[ $pct -ge $urgent_threshold ]]; then
+        echo "<system-reminder>Context at ${pct}%. Use /trim or /rollover now to avoid lossy auto-compaction at 95%.</system-reminder>"
+    elif [[ $pct -ge $recommend_threshold ]]; then
+        echo "<system-reminder>Context at ${pct}%. Recommend /trim soon, or /rollover if trim isn't helping.</system-reminder>"
+    elif [[ $pct -ge $warn_threshold ]]; then
+        echo "<system-reminder>Context at ${pct}%. Consider /trim if response quality feels degraded.</system-reminder>"
+    fi
+}
+
+# Rate-limit context checks (every 60 seconds)
+check_context_with_rate_limit() {
+    local check_file="/tmp/work-context-check-$$"
+    local now
+    local last_check
+    local check_interval=60
+
+    now=$(date +%s)
+    last_check=$(cat "$check_file" 2>/dev/null || echo 0)
+
+    if (( now - last_check > check_interval )); then
+        echo "$now" > "$check_file"
+        local context_pct
+        context_pct=$(get_context_percentage)
+        if [[ -n "$context_pct" && "$context_pct" =~ ^[0-9]+$ ]]; then
+            inject_context_reminder "$context_pct"
+        fi
+    fi
+}
+
+# Only run context check if we're in a worker session
+if [[ -n "${WORK_WORKER_ID:-}" ]]; then
+    check_context_with_rate_limit
+fi
+
 exit 0
