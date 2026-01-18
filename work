@@ -195,6 +195,123 @@ def get_context_percentage_from_file(session_file: Path) -> Optional[int]:
         return None
 
 
+def truncate_content(
+    content: str,
+    threshold: int,
+    tool_name: str,
+    line_num: int,
+    parent_file: str,
+) -> str:
+    """
+    Truncate content if it exceeds threshold.
+    Keeps first N chars and adds reference to parent file.
+    """
+    if len(content) <= threshold:
+        return content
+
+    truncated = content[:threshold]
+    notice = (
+        f"\n\n[...truncated - original was {len(content):,} chars, "
+        f"showing first {threshold}. See line {line_num} of {parent_file} for full content]"
+    )
+
+    result = truncated + notice
+    # Only return truncated if it actually saves space
+    if len(result) >= len(content):
+        return content
+    return result
+
+
+def build_tool_name_mapping(session_file: Path) -> dict:
+    """
+    Build mapping of tool_use_id -> tool_name from session file.
+    First pass to enable identifying tool results by their tool name.
+    """
+    tool_map = {}
+
+    with open(session_file, "r") as f:
+        for line in f:
+            try:
+                data = json.loads(line.strip())
+                if data.get("type") == "assistant":
+                    content = data.get("message", {}).get("content", [])
+                    if isinstance(content, list):
+                        for item in content:
+                            if isinstance(item, dict) and item.get("type") == "tool_use":
+                                tool_id = item.get("id")
+                                tool_name = item.get("name")
+                                if tool_id and tool_name:
+                                    tool_map[tool_id] = tool_name
+            except json.JSONDecodeError:
+                continue
+
+    return tool_map
+
+
+def trim_session_file(
+    input_file: Path,
+    output_file: Path,
+    threshold: int = 500,
+    target_tools: set = None,
+) -> dict:
+    """
+    Trim large tool outputs from a Claude session file.
+    Returns stats about what was trimmed.
+    """
+    if target_tools is None:
+        target_tools = {"Read", "Bash", "Grep", "Glob"}
+
+    tool_map = build_tool_name_mapping(input_file)
+    parent_file = str(input_file.absolute())
+
+    trimmed_count = 0
+    original_size = 0
+    new_size = 0
+
+    with open(input_file, "r") as infile, open(output_file, "w") as outfile:
+        for line_num, line in enumerate(infile, start=1):
+            original_size += len(line)
+
+            try:
+                data = json.loads(line.strip())
+
+                # Process user messages containing tool results
+                if data.get("type") == "user":
+                    content = data.get("message", {}).get("content", [])
+                    if isinstance(content, list):
+                        for item in content:
+                            if isinstance(item, dict) and item.get("type") == "tool_result":
+                                tool_use_id = item.get("tool_use_id")
+                                tool_name = tool_map.get(tool_use_id, "Unknown")
+
+                                if tool_name in target_tools:
+                                    result_content = item.get("content", "")
+                                    if isinstance(result_content, str) and len(result_content) > threshold:
+                                        item["content"] = truncate_content(
+                                            result_content,
+                                            threshold,
+                                            tool_name,
+                                            line_num,
+                                            parent_file,
+                                        )
+                                        trimmed_count += 1
+
+                new_line = json.dumps(data) + "\n"
+                outfile.write(new_line)
+                new_size += len(new_line)
+
+            except json.JSONDecodeError:
+                outfile.write(line)
+                new_size += len(line)
+
+    return {
+        "trimmed_count": trimmed_count,
+        "original_size": original_size,
+        "new_size": new_size,
+        "bytes_saved": original_size - new_size,
+    }
+
+
 # =============================================================================
 # Database Layer
 # =============================================================================
