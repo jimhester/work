@@ -573,6 +573,55 @@ def db_get_message_count(worker_id: int) -> int:
         return cursor.fetchone()["count"]
 
 
+def db_create_session(
+    worker_id: int,
+    session_number: int,
+    claude_session_id: Optional[str] = None,
+) -> int:
+    """Create a new session record for a worker."""
+    with get_db() as conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO sessions (worker_id, session_number, session_id)
+            VALUES (?, ?, ?)
+            """,
+            (worker_id, session_number, claude_session_id),
+        )
+        return cursor.lastrowid
+
+
+def db_end_session(
+    session_id: int,
+    end_reason: str,
+    context_at_end: Optional[int] = None,
+    summary: Optional[str] = None,
+) -> None:
+    """Mark a session as ended with metadata."""
+    with get_db() as conn:
+        conn.execute(
+            """
+            UPDATE sessions
+            SET ended_at = CURRENT_TIMESTAMP,
+                end_reason = ?,
+                context_at_end = ?,
+                summary = ?
+            WHERE id = ?
+            """,
+            (end_reason, context_at_end, summary, session_id),
+        )
+
+
+def db_get_current_session_number(worker_id: int) -> int:
+    """Get the highest session number for a worker, or 0 if none."""
+    with get_db() as conn:
+        cursor = conn.execute(
+            "SELECT MAX(session_number) FROM sessions WHERE worker_id = ?",
+            (worker_id,),
+        )
+        result = cursor.fetchone()[0]
+        return result if result is not None else 0
+
+
 # =============================================================================
 # Issue Parsing
 # =============================================================================

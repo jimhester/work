@@ -374,3 +374,64 @@ class TestSessionsTable:
                 "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_sessions_worker'"
             )
             assert cursor.fetchone() is not None
+
+
+class TestSessionCRUD:
+    """Tests for session create/read/update functions."""
+
+    def test_create_session(self, initialized_db, sample_worker):
+        """Should create a new session record."""
+        session_id = work.db_create_session(
+            worker_id=sample_worker,
+            session_number=1,
+            claude_session_id="uuid-123"
+        )
+        assert session_id is not None
+
+        with work.get_db() as conn:
+            cursor = conn.execute(
+                "SELECT worker_id, session_number, session_id FROM sessions WHERE id = ?",
+                (session_id,)
+            )
+            row = cursor.fetchone()
+            assert row[0] == sample_worker
+            assert row[1] == 1
+            assert row[2] == "uuid-123"
+
+    def test_end_session(self, initialized_db, sample_worker):
+        """Should update session with end info."""
+        session_id = work.db_create_session(
+            worker_id=sample_worker,
+            session_number=1,
+        )
+
+        work.db_end_session(
+            session_id=session_id,
+            end_reason="rollover",
+            context_at_end=75,
+            summary="Test summary"
+        )
+
+        with work.get_db() as conn:
+            cursor = conn.execute(
+                "SELECT end_reason, context_at_end, summary, ended_at FROM sessions WHERE id = ?",
+                (session_id,)
+            )
+            row = cursor.fetchone()
+            assert row[0] == "rollover"
+            assert row[1] == 75
+            assert row[2] == "Test summary"
+            assert row[3] is not None  # ended_at set
+
+    def test_get_current_session_number(self, initialized_db, sample_worker):
+        """Should return highest session number for worker."""
+        work.db_create_session(worker_id=sample_worker, session_number=1)
+        work.db_create_session(worker_id=sample_worker, session_number=2)
+
+        result = work.db_get_current_session_number(sample_worker)
+        assert result == 2
+
+    def test_get_current_session_number_no_sessions(self, initialized_db, sample_worker):
+        """Should return 0 when no sessions exist."""
+        result = work.db_get_current_session_number(sample_worker)
+        assert result == 0
