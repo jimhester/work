@@ -161,6 +161,40 @@ VALID_STAGES = [
     "done", "blocked"
 ]
 
+
+# =============================================================================
+# Context Management Utilities
+# =============================================================================
+
+def get_context_percentage_from_file(session_file: Path) -> Optional[int]:
+    """
+    Parse context percentage from a Claude session JSONL file.
+    Returns None if file doesn't exist or has no context metadata.
+    """
+    if not session_file.exists():
+        return None
+
+    try:
+        # Read file in reverse to find most recent metadata
+        with open(session_file, "r") as f:
+            lines = f.readlines()
+
+        for line in reversed(lines):
+            try:
+                data = json.loads(line.strip())
+                if "contextTokens" in data and "maxContextTokens" in data:
+                    context_tokens = data["contextTokens"]
+                    max_tokens = data["maxContextTokens"]
+                    if max_tokens > 0:
+                        return int((context_tokens / max_tokens) * 100)
+            except json.JSONDecodeError:
+                continue
+
+        return None
+    except Exception:
+        return None
+
+
 # =============================================================================
 # Database Layer
 # =============================================================================
