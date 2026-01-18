@@ -370,6 +370,36 @@ def update_session_id_in_file(file_path: Path, new_session_id: str) -> None:
         f.writelines(lines)
 
 
+def build_continuation_prompt(
+    session_number: int,
+    issue_ref: str,
+    context_pct: int,
+    summary: str,
+    parent_session_path: str,
+    worker_id: str,
+) -> str:
+    """
+    Build a continuation prompt for session rollover.
+    Returns markdown-formatted handoff instructions.
+    """
+    return f"""## Session Continuation
+
+This is session #{session_number} for {issue_ref}.
+Previous session rolled over at {context_pct}% context to preserve quality.
+
+### Handoff Summary
+{summary}
+
+### Retrieving Details
+The full previous session is indexed in episodic-memory.
+Use the search tool to retrieve specific details, decisions, or code snippets as needed.
+
+### Lineage
+Parent session: {parent_session_path}
+Worker ID: {worker_id}
+"""
+
+
 # =============================================================================
 # Database Layer
 # =============================================================================
@@ -1517,11 +1547,13 @@ def extract_plan_name(plan_path: str) -> str:
 @click.option('--force', 'force', is_flag=True, help='Skip confirmation prompts (for --cleanup)')
 @click.option('--plan', 'plan_file', type=click.Path(exists=True), help='Execute a plan file in a new worker')
 @click.option('--trim', 'do_trim', is_flag=True, help='Trim current session context (requires worker env)')
+@click.option('--rollover', 'do_rollover', is_flag=True, help='Roll over to new session with handoff (requires worker env)')
+@click.option('--summary-file', 'summary_file', type=click.Path(exists=True), help='Path to summary text file (for --rollover)')
 @click.pass_context
 def cli(ctx, issues, here, show_status, show_events, show_logs, do_stop, do_send,
         show_messages, peek, quiet, set_stage, mark_done, set_pr, log_event, transition, msg_type,
         do_init, no_ai, do_review, pre_merge, dry_run, show_reviews, do_resume, do_cleanup, force,
-        plan_file, do_trim):
+        plan_file, do_trim, do_rollover, summary_file):
     """
     Start Claude Code session(s) for GitHub issue(s) or JIRA tickets.
 
@@ -1592,6 +1624,15 @@ def cli(ctx, issues, here, show_status, show_events, show_logs, do_stop, do_send
         if not worker_id:
             raise click.ClickException("--trim can only be used within a worker session (WORK_WORKER_ID not set)")
         cmd_trim(worker_id)
+        return
+
+    if do_rollover:
+        worker_id = os.environ.get("WORK_WORKER_ID")
+        if not worker_id:
+            raise click.ClickException("--rollover can only be used within a worker session (WORK_WORKER_ID not set)")
+        if not summary_file:
+            raise click.ClickException("--rollover requires --summary-file")
+        cmd_rollover(worker_id, Path(summary_file))
         return
 
     # Handle management commands
@@ -2701,6 +2742,111 @@ def cmd_trim(worker_id: str) -> None:
     click.echo("")
     click.echo("To resume with trimmed context:")
     click.echo(f"  claude --resume {new_session_id}")
+
+
+def cmd_rollover(worker_id: str, summary_file: Path) -> None:
+    """Roll over to a new session with handoff summary."""
+    import tempfile
+
+    # 1. Read summary from file
+    summary = summary_file.read_text().strip()
+    click.echo(f"Read summary from: {summary_file}")
+
+    # 2. Sync to episodic-memory (best effort)
+    click.echo("Syncing to episodic-memory...")
+    subprocess.run(
+        ["claude", "mcp", "run", "episodic-memory", "sync", "-y"],
+        check=False,
+        capture_output=True
+    )
+
+    # 3. Get worker info from database
+    init_db()
+    worker_id_int = int(worker_id)
+    with get_db() as conn:
+        cursor = conn.execute(
+            "SELECT issue_number, jira_key, repo_name FROM workers WHERE id=?",
+            (worker_id_int,)
+        )
+        row = cursor.fetchone()
+        if not row:
+            raise click.ClickException(f"Worker {worker_id} not found in database")
+
+        issue_number = row["issue_number"]
+        jira_key = row["jira_key"]
+        repo_name = row["repo_name"]
+
+    # Build issue reference
+    if jira_key:
+        issue_ref = jira_key
+    elif issue_number:
+        issue_ref = f"issue #{issue_number}"
+    else:
+        issue_ref = f"worker {worker_id}"
+
+    # 4. Get context percentage from current session file
+    session_file = find_current_session_file()
+    context_pct = 0
+    parent_session_path = ""
+    if session_file:
+        context_pct = get_context_percentage_from_file(session_file) or 0
+        parent_session_path = str(session_file)
+        click.echo(f"Current context: {context_pct}%")
+
+    # 5. End current session in DB
+    current_session_num = db_get_current_session_number(worker_id_int)
+    if current_session_num > 0:
+        # Get the session record ID to end it
+        with get_db() as conn:
+            cursor = conn.execute(
+                "SELECT id FROM sessions WHERE worker_id=? AND session_number=? AND ended_at IS NULL",
+                (worker_id_int, current_session_num)
+            )
+            session_row = cursor.fetchone()
+            if session_row:
+                db_end_session(
+                    session_id=session_row["id"],
+                    end_reason="rollover",
+                    context_at_end=context_pct,
+                    summary=summary
+                )
+                click.echo(f"Ended session #{current_session_num}")
+
+    # 6. Create new session record
+    new_session_num = current_session_num + 1
+    db_create_session(
+        worker_id=worker_id_int,
+        session_number=new_session_num,
+    )
+    click.echo(f"Created session #{new_session_num}")
+
+    # 7. Build continuation prompt
+    prompt = build_continuation_prompt(
+        session_number=new_session_num,
+        issue_ref=issue_ref,
+        context_pct=context_pct,
+        summary=summary,
+        parent_session_path=parent_session_path,
+        worker_id=worker_id,
+    )
+
+    # 8. Write prompt to temp file
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False) as f:
+        f.write(prompt)
+        prompt_file = f.name
+    click.echo(f"Wrote continuation prompt to: {prompt_file}")
+
+    # 9. Output instructions
+    click.echo("")
+    click.echo("=" * 60)
+    click.echo("SESSION ROLLOVER COMPLETE")
+    click.echo("=" * 60)
+    click.echo("")
+    click.echo("To continue in a new session, run:")
+    click.echo(f"  claude --prompt-file {prompt_file}")
+    click.echo("")
+    click.echo("Or to resume from the prompt manually, copy the content from:")
+    click.echo(f"  {prompt_file}")
 
 
 def cmd_send(issue: str, message: str, msg_type: str = "info"):

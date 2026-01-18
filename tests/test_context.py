@@ -152,3 +152,64 @@ class TestTrimCommand:
         result = runner.invoke(work.cli, ["--trim"], env={"WORK_WORKER_ID": ""})
         assert result.exit_code != 0
         assert "worker session" in result.output.lower() or "WORK_WORKER_ID" in result.output
+
+
+class TestRolloverCommand:
+    """Tests for the --rollover CLI command."""
+
+    def test_rollover_command_requires_worker_env(self, tmp_path):
+        """Should error when WORK_WORKER_ID is not set."""
+        from click.testing import CliRunner
+
+        # Create a summary file
+        summary_file = tmp_path / "summary.txt"
+        summary_file.write_text("Test summary")
+
+        runner = CliRunner()
+        result = runner.invoke(
+            work.cli,
+            ["--rollover", "--summary-file", str(summary_file)],
+            env={"WORK_WORKER_ID": ""}
+        )
+        assert result.exit_code != 0
+        assert "worker session" in result.output.lower() or "WORK_WORKER_ID" in result.output
+
+    def test_rollover_command_requires_summary_file(self):
+        """Should error when --summary-file is not provided."""
+        from click.testing import CliRunner
+
+        runner = CliRunner()
+        result = runner.invoke(
+            work.cli,
+            ["--rollover"],
+            env={"WORK_WORKER_ID": "123"}
+        )
+        assert result.exit_code != 0
+        assert "summary-file" in result.output.lower() or "required" in result.output.lower()
+
+
+class TestBuildContinuationPrompt:
+    """Tests for build_continuation_prompt function."""
+
+    def test_builds_correct_markdown_format(self):
+        """Should build prompt with correct markdown structure."""
+        result = work.build_continuation_prompt(
+            session_number=3,
+            issue_ref="issue #42",
+            context_pct=85,
+            summary="Fixed the bug and added tests",
+            parent_session_path="/path/to/session.jsonl",
+            worker_id="123"
+        )
+
+        assert "## Session Continuation" in result
+        assert "session #3" in result
+        assert "issue #42" in result
+        assert "85%" in result
+        assert "### Handoff Summary" in result
+        assert "Fixed the bug and added tests" in result
+        assert "### Retrieving Details" in result
+        assert "episodic-memory" in result
+        assert "### Lineage" in result
+        assert "/path/to/session.jsonl" in result
+        assert "123" in result
