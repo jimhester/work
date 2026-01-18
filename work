@@ -2281,13 +2281,14 @@ def cmd_plan(plan_file: str, here: bool = False):
     # Register worker (use plan name as identifier)
     init_db()
     worker_id = db_register_worker(
-        repo=repo_name,
+        repo_path=str(repo_root),
+        repo_name=repo_name,
         issue_number=None,  # No issue number for plans
         branch=branch_name,
-        worktree=str(worktree_path),
+        worktree_path=str(worktree_path),
         pid=os.getpid() if here else 0,
-        issue_source="plan",
         jira_key=plan_name,  # Use plan name as the lookup key
+        issue_source="plan",
     )
 
     # Change to worktree and start Claude
