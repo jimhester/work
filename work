@@ -1027,18 +1027,48 @@ Read CLAUDE.md first for project conventions, test commands, and labels.
 {jira_instructions}
 ## Workflow
 
-1. **Plan**: Use EnterPlanMode to explore the codebase and create an implementation plan before writing code
-2. **Implement**: Read requirements{jira_phase1_note}, code, test locally, commit
-3. **Self-review**: Run `work --review` (required before PR creation)
-4. **Create PR**: `{gh_cli} pr create{repo_flag}`
-5. **CI loop**: `{gh_cli} pr checks --watch{repo_flag}` - fix failures, push fixes
-6. **Merge**: Requires approval + `work --review --pre-merge`, then `{gh_cli} pr merge --squash{repo_flag}`
-7. **Follow-up**: Create issues for TODOs, deferred feedback, or gaps identified
-8. **Done**: Run `work --done` and summarize what was accomplished
+### 1. Understand & Plan
+- Read the issue/requirements thoroughly{jira_phase1_note}
+- For complex tasks: use `superpowers:brainstorming` to explore the problem space
+- Use `superpowers:writing-plans` to create a detailed implementation plan
+- Plans should have bite-sized tasks (2-5 min each) with exact file paths and code
+
+### 2. Implement
+- Follow `superpowers:test-driven-development` strictly: RED -> GREEN -> REFACTOR
+- Write failing test first, then minimal code to pass, then refactor
+- If you hit bugs: use `superpowers:systematic-debugging` (investigate before fixing)
+- Request code review between major steps: `superpowers:requesting-code-review`
+
+### 3. Verify & Self-Review
+- Use `superpowers:verification-before-completion` - run ALL tests, read output, confirm passing
+- Only after verification passes: run `work --review` (required gate for PR creation)
+
+### 4. Create PR
+- `{gh_cli} pr create{repo_flag}`
+
+### 5. CI Loop
+- `{gh_cli} pr checks --watch{repo_flag}` - wait for CI
+- If failures: debug with `superpowers:systematic-debugging`, fix, push, repeat
+
+### 6. Address Review Feedback
+- Use `superpowers:receiving-code-review` - technical rigor, not blind agreement
+- Push back on incorrect feedback with evidence
+- After changes: run `superpowers:verification-before-completion` again
+
+### 7. Merge
+- Requires approval (not just "Requested")
+- Run `work --review --pre-merge` (final gate)
+- Use `superpowers:finishing-a-development-branch` for merge decision
+- `{gh_cli} pr merge --squash{repo_flag}`
+
+### 8. Follow-up & Done
+- Create issues for TODOs, deferred feedback, or gaps identified
+- Run `work --done` and summarize what was accomplished
 
 ## Key Rules
-- NEVER merge without an approving review (not just "Requested")
-- If blocked waiting for human review, use `work --stage blocked` and wait
+- NEVER merge without an approving review
+- NEVER claim "tests pass" without running them and reading output
+- If blocked waiting for human review: `work --stage blocked` and wait
 - Check messages periodically: `work --messages`
 {worker_guidelines_section}"""
 

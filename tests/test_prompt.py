@@ -18,14 +18,13 @@ class TestGeneratePrompt:
         assert "Fix bug #42" in prompt
 
         # Check key workflow steps are present
-        assert "**Plan**" in prompt
-        assert "**Implement**" in prompt
-        assert "**Self-review**" in prompt
-        assert "**Create PR**" in prompt
-        assert "**CI loop**" in prompt
-        assert "**Merge**" in prompt
-        assert "**Follow-up**" in prompt
-        assert "**Done**" in prompt
+        assert "Understand & Plan" in prompt
+        assert "Implement" in prompt
+        assert "Self-Review" in prompt
+        assert "Create PR" in prompt
+        assert "CI Loop" in prompt
+        assert "Merge" in prompt
+        assert "Follow-up & Done" in prompt
 
         # Check important instructions
         assert "CLAUDE.md" in prompt
@@ -92,7 +91,7 @@ class TestGeneratePrompt:
         prompt = work.generate_prompt("Task", "gh")
 
         assert "work --review" in prompt
-        assert "required before PR" in prompt
+        assert "required gate for PR creation" in prompt
 
     def test_pre_merge_review_mentioned(self, monkeypatch):
         """Should mention pre-merge review requirement."""
@@ -117,8 +116,8 @@ class TestGeneratePrompt:
 
         prompt = work.generate_prompt("Task", "gh")
 
-        assert "**Follow-up**" in prompt
-        assert "TODOs" in prompt or "follow-up" in prompt.lower()
+        assert "Follow-up & Done" in prompt
+        assert "TODOs" in prompt
 
     def test_messages_mentioned(self, monkeypatch):
         """Should mention the messages feature."""
@@ -127,6 +126,26 @@ class TestGeneratePrompt:
         prompt = work.generate_prompt("Task", "gh")
 
         assert "work --messages" in prompt
+
+    def test_superpowers_skills_referenced(self, monkeypatch):
+        """Should reference superpowers skills at appropriate workflow steps."""
+        monkeypatch.setattr(work, "load_work_config", lambda: work.WorkConfig())
+
+        prompt = work.generate_prompt("Task", "gh")
+
+        # Planning skills
+        assert "superpowers:brainstorming" in prompt
+        assert "superpowers:writing-plans" in prompt
+
+        # Implementation skills
+        assert "superpowers:test-driven-development" in prompt
+        assert "superpowers:systematic-debugging" in prompt
+        assert "superpowers:requesting-code-review" in prompt
+
+        # Verification and review skills
+        assert "superpowers:verification-before-completion" in prompt
+        assert "superpowers:receiving-code-review" in prompt
+        assert "superpowers:finishing-a-development-branch" in prompt
 
 
 class TestGeneratePromptEdgeCases:
