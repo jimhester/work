@@ -1,0 +1,5 @@
+
+# Work tool temporary files
+.work-review-status
+tests/__pycache__/
+__pycache__/
