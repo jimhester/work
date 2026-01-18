@@ -1361,6 +1361,43 @@ def ensure_hooks_installed() -> None:
             click.echo("")
 
 
+def ensure_statusline_installed() -> None:
+    """Install the work status line script for Claude Code."""
+    import shutil
+
+    scripts_dir = Path.home() / ".claude" / "scripts"
+    scripts_dir.mkdir(parents=True, exist_ok=True)
+
+    statusline_dest = scripts_dir / "work-statusline.sh"
+    settings_file = Path.home() / ".claude" / "settings.json"
+
+    # Find source script relative to this script
+    script_dir = Path(__file__).resolve().parent
+    statusline_src = script_dir / "scripts" / "work-statusline.sh"
+
+    # Copy the script if source exists
+    if statusline_src.exists():
+        shutil.copy2(statusline_src, statusline_dest)
+        statusline_dest.chmod(0o755)
+    else:
+        click.echo(f"Warning: Could not find {statusline_src}", err=True)
+        return
+
+    # Update settings.json to use the status line
+    settings = {}
+    if settings_file.exists():
+        try:
+            settings = json.loads(settings_file.read_text())
+        except json.JSONDecodeError:
+            settings = {}
+
+    # Set the status line command
+    settings["statusLineCommand"] = str(statusline_dest)
+
+    settings_file.write_text(json.dumps(settings, indent=2) + "\n")
+    click.echo(f"Installed status line: {statusline_dest}")
+
+
 def generate_guidelines_from_claude_md(claude_md_content: str) -> Optional[dict]:
     """Generate project-specific guidelines from CLAUDE.md using Claude."""
     prompt = f"""Analyze this CLAUDE.md file and generate project-specific guidelines for a work agent.
@@ -1454,9 +1491,12 @@ def ensure_gitignore_entry(repo_root: Path, entry: str) -> bool:
 
 
 def cmd_init(no_ai: bool = False) -> None:
-    """Create .work.toml config file and ensure hooks are installed."""
+    """Create .work.toml config file and ensure hooks and status line are installed."""
     # First ensure global hooks are installed
     ensure_hooks_installed()
+
+    # Install the custom status line for worker visibility
+    ensure_statusline_installed()
 
     repo_root = get_repo_root()
     if not repo_root:

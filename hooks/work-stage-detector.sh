@@ -5,17 +5,45 @@
 # the worker's stage via the work CLI. It also checks for pending messages after
 # every command to ensure timely delivery. It supports:
 #
-#   Event                    | Resulting Stage
-#   -------------------------|----------------
-#   gh pr create             | ci_waiting
-#   CI passes (gh pr checks) | review_waiting
-#   gh pr merge              | done
-#   Merge/rebase conflicts   | merge_conflicts
+#   Event                    | Resulting Stage      | Notification
+#   -------------------------|----------------------|-------------
+#   gh pr create             | ci_waiting           | -
+#   CI passes (gh pr checks) | review_waiting       | -
+#   gh pr merge              | done                 | Yes
+#   Merge/rebase conflicts   | merge_conflicts      | Yes
 #
 # Additionally, after every Bash command, it checks for and displays any pending
 # messages sent to this worker via `work --send`.
 
 set -euo pipefail
+
+# =============================================================================
+# Desktop Notifications
+# =============================================================================
+# Cross-platform toast notification function
+# Supports: WSL2 (Windows toast), macOS, Linux (notify-send)
+
+toast() {
+    local title="$1"
+    local body="$2"
+
+    # WSL2 - Windows toast via PowerShell (no extra dependencies)
+    if [[ "$(uname -r)" == *microsoft* ]]; then
+        powershell.exe -Command "
+            Add-Type -AssemblyName System.Windows.Forms
+            \$n = New-Object System.Windows.Forms.NotifyIcon
+            \$n.Icon = [System.Drawing.SystemIcons]::Information
+            \$n.Visible = \$true
+            \$n.ShowBalloonTip(5000, '$title', '$body', 'Info')
+        " &>/dev/null &
+    # macOS - osascript
+    elif [[ "$OSTYPE" == darwin* ]]; then
+        osascript -e "display notification \"$body\" with title \"$title\"" &>/dev/null &
+    # Linux - notify-send (if available)
+    elif command -v notify-send &>/dev/null; then
+        notify-send "$title" "$body" &>/dev/null &
+    fi
+}
 
 # Read hook input from stdin
 HOOK_INPUT=$(cat)
@@ -65,6 +93,7 @@ elif [[ "$COMMAND" =~ gh[e]?[[:space:]]+pr[[:space:]]+checks ]]; then
         # For --watch, we need to check the final status
         if echo "$STDOUT" | grep -qiE '(fail|error)'; then
             "$WORK_SCRIPT" --event "ci_failure" "CI checks failed" >/dev/null 2>&1 || true
+            toast "Worker #${WORK_WORKER_ID} blocked" "CI checks failed"
         elif echo "$STDOUT" | grep -qiE '(pass|success|✓)' && ! echo "$STDOUT" | grep -qiE '(pending|running|queued)'; then
             # All checks passed - transition to review_waiting
             "$WORK_SCRIPT" --transition "review_waiting" "review" "review_waiting" "ci_passed" "All CI checks passed" >/dev/null 2>&1 || true
@@ -85,6 +114,7 @@ elif [[ "$COMMAND" =~ gh[e]?[[:space:]]+pr[[:space:]]+merge ]] && [[ "$EXIT_CODE
     # Check if merge was successful from output
     if echo "$RESPONSE" | grep -qiE '(merged|successfully)'; then
         "$WORK_SCRIPT" --transition "merged" "follow_up" "done" "pr_merged" "PR merged successfully" >/dev/null 2>&1 || true
+        toast "Worker #${WORK_WORKER_ID} complete" "PR merged successfully"
     fi
 
 # Detect resolved conflicts: git rebase --continue or git merge --continue
@@ -97,6 +127,7 @@ elif [[ "$COMMAND" =~ git[[:space:]]+(rebase|merge)[[:space:]]+--continue ]] && 
 elif [[ "$COMMAND" =~ git[[:space:]]+(rebase|merge|pull) ]]; then
     if echo "$RESPONSE" | grep -qiE '(CONFLICT|conflict|Automatic merge failed)'; then
         "$WORK_SCRIPT" --transition "merge_conflicts" "blocked" "merge_conflicts" "conflict_detected" "Merge conflict detected" >/dev/null 2>&1 || true
+        toast "Worker #${WORK_WORKER_ID} blocked" "Merge conflict detected"
     fi
 fi
 
