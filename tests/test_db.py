@@ -19,6 +19,7 @@ class TestDatabaseInit:
             conn.execute("SELECT * FROM events LIMIT 1")
             conn.execute("SELECT * FROM completions LIMIT 1")
             conn.execute("SELECT * FROM messages LIMIT 1")
+            conn.execute("SELECT * FROM sessions LIMIT 1")
 
     def test_init_is_idempotent(self, temp_db):
         """Calling init_db multiple times should not error."""
@@ -342,3 +343,34 @@ class TestValidStages:
                     (sample_worker,)
                 ).fetchone()
                 assert row["stage"] == stage
+
+
+class TestSessionsTable:
+    """Tests for the sessions tracking table."""
+
+    def test_sessions_table_created(self, initialized_db):
+        """Sessions table should be created on init."""
+        with work.get_db() as conn:
+            cursor = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='sessions'"
+            )
+            assert cursor.fetchone() is not None
+
+    def test_sessions_table_has_expected_columns(self, initialized_db):
+        """Sessions table should have all required columns."""
+        with work.get_db() as conn:
+            cursor = conn.execute("PRAGMA table_info(sessions)")
+            columns = {row[1] for row in cursor.fetchall()}
+            expected = {
+                "id", "worker_id", "session_number", "session_id",
+                "started_at", "ended_at", "end_reason", "context_at_end", "summary"
+            }
+            assert expected.issubset(columns)
+
+    def test_sessions_index_created(self, initialized_db):
+        """Index on worker_id should exist."""
+        with work.get_db() as conn:
+            cursor = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_sessions_worker'"
+            )
+            assert cursor.fetchone() is not None

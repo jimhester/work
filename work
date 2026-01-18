@@ -188,12 +188,25 @@ CREATE TABLE IF NOT EXISTS messages (
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS sessions (
+    id INTEGER PRIMARY KEY,
+    worker_id INTEGER REFERENCES workers(id),
+    session_number INTEGER,
+    session_id TEXT,
+    started_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    ended_at TEXT,
+    end_reason TEXT,
+    context_at_end INTEGER,
+    summary TEXT
+);
+
 CREATE INDEX IF NOT EXISTS idx_workers_status ON workers(status);
 CREATE INDEX IF NOT EXISTS idx_workers_repo ON workers(repo_path);
 CREATE INDEX IF NOT EXISTS idx_events_worker ON events(worker_id);
 CREATE INDEX IF NOT EXISTS idx_events_time ON events(created_at);
 CREATE INDEX IF NOT EXISTS idx_messages_worker ON messages(worker_id);
 CREATE INDEX IF NOT EXISTS idx_messages_unread ON messages(worker_id, read_at);
+CREATE INDEX IF NOT EXISTS idx_sessions_worker ON sessions(worker_id);
 """
 
 
