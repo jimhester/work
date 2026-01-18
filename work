@@ -1391,8 +1391,12 @@ def ensure_statusline_installed() -> None:
         except json.JSONDecodeError:
             settings = {}
 
-    # Set the status line command
-    settings["statusLineCommand"] = str(statusline_dest)
+    # Set the status line configuration
+    settings["statusLine"] = {
+        "type": "command",
+        "command": str(statusline_dest),
+        "padding": 0
+    }
 
     settings_file.write_text(json.dumps(settings, indent=2) + "\n")
     click.echo(f"Installed status line: {statusline_dest}")
