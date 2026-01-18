@@ -2330,15 +2330,13 @@ def spawn_in_new_tab_with_prompt(worktree_path: str, worker_id: int, prompt: str
         subprocess.run(["osascript", "-e", script], check=True)
     elif method == "wsl":
         # Find Windows Terminal
-        wt_paths = [
-            "/mnt/c/Users/jhester/AppData/Local/Microsoft/WindowsApps/wt.exe",
-            "/mnt/c/Program Files/WindowsApps/Microsoft.WindowsTerminal_1.18.3181.0_x64__8wekyb3d8bbwe/wt.exe",
-        ]
-        wt_exe = next((p for p in wt_paths if Path(p).exists()), None)
-        if not wt_exe:
-            raise click.ClickException("Windows Terminal not found")
+        import glob
+        wt_paths = glob.glob("/mnt/c/Users/*/AppData/Local/Microsoft/WindowsApps/wt.exe")
+        if not wt_paths:
+            raise click.ClickException("Windows Terminal (wt.exe) not found")
 
-        distro = subprocess.run(["wslvar", "WSL_DISTRO_NAME"], capture_output=True, text=True).stdout.strip() or "Ubuntu"
+        wt_exe = wt_paths[0]
+        distro = os.environ.get("WSL_DISTRO_NAME", "Ubuntu")
         shell = os.environ.get("SHELL", "/bin/bash")
         cmd = f"cd '{worktree_path}' && WORK_WORKER_ID={worker_id} WORK_DB_PATH='{config.db_path}' claude --dangerously-skip-permissions {escaped_prompt}"
         subprocess.run([
