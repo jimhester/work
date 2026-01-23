@@ -1904,6 +1904,40 @@ def ensure_statusline_installed() -> None:
     click.echo(f"Installed status line: {statusline_dest}")
 
 
+def ensure_skills_installed() -> None:
+    """Install work skills (trim, rollover, work) as symlinks in ~/.claude/skills/."""
+    skills_dir = Path.home() / ".claude" / "skills"
+    skills_dir.mkdir(parents=True, exist_ok=True)
+
+    # Find skills directory relative to this script
+    script_dir = Path(__file__).resolve().parent
+    source_skills_dir = script_dir / "skills"
+
+    if not source_skills_dir.exists():
+        click.echo(f"Warning: Could not find skills directory at {source_skills_dir}", err=True)
+        return
+
+    installed = []
+    for skill_path in source_skills_dir.iterdir():
+        if skill_path.is_dir():
+            dest_link = skills_dir / skill_path.name
+            if dest_link.exists() or dest_link.is_symlink():
+                # Check if it points to the right place
+                if dest_link.is_symlink() and dest_link.resolve() == skill_path.resolve():
+                    continue  # Already correctly installed
+                # Remove stale symlink or directory
+                if dest_link.is_symlink():
+                    dest_link.unlink()
+                else:
+                    click.echo(f"Warning: {dest_link} exists but is not a symlink, skipping", err=True)
+                    continue
+            dest_link.symlink_to(skill_path)
+            installed.append(skill_path.name)
+
+    if installed:
+        click.echo(f"Installed skills: {', '.join(installed)}")
+
+
 def generate_guidelines_from_claude_md(claude_md_content: str) -> Optional[dict]:
     """Generate project-specific guidelines from CLAUDE.md using Claude."""
     prompt = f"""Analyze this CLAUDE.md file and generate project-specific guidelines for a work agent.
@@ -1997,12 +2031,15 @@ def ensure_gitignore_entry(repo_root: Path, entry: str) -> bool:
 
 
 def cmd_init(no_ai: bool = False) -> None:
-    """Create .work.toml config file and ensure hooks and status line are installed."""
+    """Create .work.toml config file and ensure hooks, status line, and skills are installed."""
     # First ensure global hooks are installed
     ensure_hooks_installed()
 
     # Install the custom status line for worker visibility
     ensure_statusline_installed()
+
+    # Install skills (trim, rollover, work)
+    ensure_skills_installed()
 
     repo_root = get_repo_root()
     if not repo_root:
@@ -2700,12 +2737,13 @@ def spawn_in_new_tab_with_prompt(worktree_path: str, worker_id: int, prompt: str
 
     if method == "iterm2":
         cmd = f"cd '{worktree_path}' && WORK_WORKER_ID={worker_id} WORK_DB_PATH='{config.db_path}' claude --dangerously-skip-permissions {escaped_prompt}"
+        escaped_cmd = cmd.replace('"', '\\"')
         script = f'''
         tell application "iTerm"
             tell current window
                 create tab with default profile
                 tell current session
-                    write text "{cmd.replace('"', '\\"')}"
+                    write text "{escaped_cmd}"
                 end tell
             end tell
         end tell
