@@ -410,12 +410,16 @@ def build_continuation_prompt(
     context_pct: int,
     summary: str,
     parent_session_path: str,
-    worker_id: str,
+    worker_id: Optional[str],
 ) -> str:
     """
     Build a continuation prompt for session rollover.
     Returns markdown-formatted handoff instructions.
     """
+    lineage_lines = [f"Parent session: {parent_session_path}"]
+    if worker_id:
+        lineage_lines.append(f"Worker ID: {worker_id}")
+
     return f"""## Session Continuation
 
 This is session #{session_number} for {issue_ref}.
@@ -429,8 +433,7 @@ The full previous session is indexed in episodic-memory.
 Use the search tool to retrieve specific details, decisions, or code snippets as needed.
 
 ### Lineage
-Parent session: {parent_session_path}
-Worker ID: {worker_id}
+{chr(10).join(lineage_lines)}
 """
 
 
@@ -1580,8 +1583,8 @@ def extract_plan_name(plan_path: str) -> str:
 @click.option('--cleanup', 'do_cleanup', is_flag=True, help='Find and kill orphaned claude processes')
 @click.option('--force', 'force', is_flag=True, help='Skip confirmation prompts (for --cleanup)')
 @click.option('--plan', 'plan_file', type=click.Path(exists=True), help='Execute a plan file in a new worker')
-@click.option('--trim', 'do_trim', is_flag=True, help='Trim current session context (requires worker env)')
-@click.option('--rollover', 'do_rollover', is_flag=True, help='Roll over to new session with handoff (requires worker env)')
+@click.option('--trim', 'do_trim', is_flag=True, help='Trim current session context')
+@click.option('--rollover', 'do_rollover', is_flag=True, help='Roll over to new session with handoff')
 @click.option('--summary-file', 'summary_file', type=click.Path(exists=True), help='Path to summary text file (for --rollover)')
 @click.pass_context
 def cli(ctx, issues, here, show_status, show_events, show_logs, do_stop, do_send,
@@ -1654,19 +1657,14 @@ def cli(ctx, issues, here, show_status, show_events, show_logs, do_stop, do_send
         return
 
     if do_trim:
-        worker_id = os.environ.get("WORK_WORKER_ID")
-        if not worker_id:
-            raise click.ClickException("--trim can only be used within a worker session (WORK_WORKER_ID not set)")
-        cmd_trim(worker_id)
+        cmd_trim()
         return
 
     if do_rollover:
-        worker_id = os.environ.get("WORK_WORKER_ID")
-        if not worker_id:
-            raise click.ClickException("--rollover can only be used within a worker session (WORK_WORKER_ID not set)")
         if not summary_file:
             raise click.ClickException("--rollover requires --summary-file")
-        cmd_rollover(worker_id, Path(summary_file))
+        worker_id = os.environ.get("WORK_WORKER_ID")
+        cmd_rollover(Path(summary_file), worker_id)
         return
 
     # Handle management commands
@@ -2767,30 +2765,27 @@ def spawn_in_new_tab_with_prompt(worktree_path: str, worker_id: int, prompt: str
         ], check=True)
 
 
-def cmd_trim(worker_id: str) -> None:
-    """Trim current session context and restart with fresh session ID."""
+def cmd_trim() -> None:
+    """Trim current session context and restart with fresh session ID.
+
+    Works from any Claude Code session - does not require a worker environment.
+    """
     work_config = load_work_config()
 
-    # 1. Sync to episodic-memory (best effort)
-    click.echo("Syncing to episodic-memory...")
-    subprocess.run(
-        ["claude", "mcp", "run", "episodic-memory", "sync", "-y"],
-        check=False,
-        capture_output=True
-    )
+    # Note: Original session file is preserved, so episodic-memory can index it
+    # during its regular indexing cycle. No need to explicitly sync.
 
-    # 2. Find current session file
+    # 1. Find current session file
     session_file = find_current_session_file()
     if not session_file:
         raise click.ClickException("Could not find current session file")
 
-    click.echo(f"Found session file: {session_file}")
+    click.echo(f"Found session: {session_file.stem}")
 
-    # 3. Generate new session ID
+    # 2. Generate new session ID
     new_session_id = str(uuid.uuid4())
-    click.echo(f"New session ID: {new_session_id}")
 
-    # 4. Trim to temporary file
+    # 3. Trim to temporary file
     trimmed_file = session_file.with_suffix(".trimmed.jsonl")
     stats = trim_session_file(
         input_file=session_file,
@@ -2799,25 +2794,33 @@ def cmd_trim(worker_id: str) -> None:
         target_tools=set(work_config.context.trim_target_tools),
     )
 
-    click.echo(f"Trimmed {stats['trimmed_count']} tool outputs")
-    click.echo(f"Size: {stats['original_chars']:,} -> {stats['trimmed_chars']:,} chars")
-
-    # 5. Update session IDs in trimmed file
+    # 4. Update session IDs in trimmed file
     update_session_id_in_file(trimmed_file, new_session_id)
 
-    # 6. Rename to final location (new session ID)
+    # 5. Rename to final location (new session ID)
     final_file = session_file.parent / f"{new_session_id}.jsonl"
     trimmed_file.rename(final_file)
-    click.echo(f"Created: {final_file}")
 
-    # 7. Print resume command
+    # 6. Print results
+    savings_pct = 0
+    if stats['original_chars'] > 0:
+        savings_pct = 100 * (1 - stats['trimmed_chars'] / stats['original_chars'])
+
+    click.echo(f"Trimmed {stats['trimmed_count']} tool outputs")
+    click.echo(f"Size: {stats['original_chars']:,} -> {stats['trimmed_chars']:,} chars ({savings_pct:.0f}% reduction)")
     click.echo("")
     click.echo("To resume with trimmed context:")
     click.echo(f"  claude --resume {new_session_id}")
+    click.echo("")
+    click.echo("Original session preserved for episodic-memory indexing.")
 
 
-def cmd_rollover(worker_id: str, summary_file: Path) -> None:
-    """Roll over to a new session with handoff summary."""
+def cmd_rollover(summary_file: Path, worker_id: Optional[str] = None) -> None:
+    """Roll over to a new session with handoff summary.
+
+    Works from any Claude Code session. When run within a worker session
+    (WORK_WORKER_ID set), also updates worker database with session tracking.
+    """
     import tempfile
 
     # 1. Read summary from file
@@ -2832,31 +2835,7 @@ def cmd_rollover(worker_id: str, summary_file: Path) -> None:
         capture_output=True
     )
 
-    # 3. Get worker info from database
-    init_db()
-    worker_id_int = int(worker_id)
-    with get_db() as conn:
-        cursor = conn.execute(
-            "SELECT issue_number, jira_key, repo_name FROM workers WHERE id=?",
-            (worker_id_int,)
-        )
-        row = cursor.fetchone()
-        if not row:
-            raise click.ClickException(f"Worker {worker_id} not found in database")
-
-        issue_number = row["issue_number"]
-        jira_key = row["jira_key"]
-        repo_name = row["repo_name"]
-
-    # Build issue reference
-    if jira_key:
-        issue_ref = jira_key
-    elif issue_number:
-        issue_ref = f"issue #{issue_number}"
-    else:
-        issue_ref = f"worker {worker_id}"
-
-    # 4. Get context percentage from current session file
+    # 3. Get context percentage from current session file
     session_file = find_current_session_file()
     context_pct = 0
     parent_session_path = ""
@@ -2865,34 +2844,62 @@ def cmd_rollover(worker_id: str, summary_file: Path) -> None:
         parent_session_path = str(session_file)
         click.echo(f"Current context: {context_pct}%")
 
-    # 5. End current session in DB
-    current_session_num = db_get_current_session_number(worker_id_int)
-    if current_session_num > 0:
-        # Get the session record ID to end it
+    # 4. Handle worker-specific vs standalone mode
+    new_session_num = 1
+    issue_ref = "this task"
+
+    if worker_id:
+        # Worker mode: use database for session tracking
+        init_db()
+        worker_id_int = int(worker_id)
         with get_db() as conn:
             cursor = conn.execute(
-                "SELECT id FROM sessions WHERE worker_id=? AND session_number=? AND ended_at IS NULL",
-                (worker_id_int, current_session_num)
+                "SELECT issue_number, jira_key, repo_name FROM workers WHERE id=?",
+                (worker_id_int,)
             )
-            session_row = cursor.fetchone()
-            if session_row:
-                db_end_session(
-                    session_id=session_row["id"],
-                    end_reason="rollover",
-                    context_at_end=context_pct,
-                    summary=summary
+            row = cursor.fetchone()
+            if row:
+                issue_number = row["issue_number"]
+                jira_key = row["jira_key"]
+
+                # Build issue reference
+                if jira_key:
+                    issue_ref = jira_key
+                elif issue_number:
+                    issue_ref = f"issue #{issue_number}"
+                else:
+                    issue_ref = f"worker {worker_id}"
+
+                # End current session in DB
+                current_session_num = db_get_current_session_number(worker_id_int)
+                if current_session_num > 0:
+                    cursor = conn.execute(
+                        "SELECT id FROM sessions WHERE worker_id=? AND session_number=? AND ended_at IS NULL",
+                        (worker_id_int, current_session_num)
+                    )
+                    session_row = cursor.fetchone()
+                    if session_row:
+                        db_end_session(
+                            session_id=session_row["id"],
+                            end_reason="rollover",
+                            context_at_end=context_pct,
+                            summary=summary
+                        )
+                        click.echo(f"Ended session #{current_session_num}")
+
+                # Create new session record
+                new_session_num = current_session_num + 1
+                db_create_session(
+                    worker_id=worker_id_int,
+                    session_number=new_session_num,
                 )
-                click.echo(f"Ended session #{current_session_num}")
+                click.echo(f"Created session #{new_session_num}")
+            else:
+                click.echo(f"Warning: Worker {worker_id} not found in database, continuing without session tracking")
+    else:
+        click.echo("Running in standalone mode (no worker session)")
 
-    # 6. Create new session record
-    new_session_num = current_session_num + 1
-    db_create_session(
-        worker_id=worker_id_int,
-        session_number=new_session_num,
-    )
-    click.echo(f"Created session #{new_session_num}")
-
-    # 7. Build continuation prompt
+    # 5. Build continuation prompt
     prompt = build_continuation_prompt(
         session_number=new_session_num,
         issue_ref=issue_ref,
@@ -2902,13 +2909,13 @@ def cmd_rollover(worker_id: str, summary_file: Path) -> None:
         worker_id=worker_id,
     )
 
-    # 8. Write prompt to temp file
+    # 6. Write prompt to temp file
     with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False) as f:
         f.write(prompt)
         prompt_file = f.name
     click.echo(f"Wrote continuation prompt to: {prompt_file}")
 
-    # 9. Output instructions
+    # 7. Output instructions
     click.echo("")
     click.echo("=" * 60)
     click.echo("SESSION ROLLOVER COMPLETE")
