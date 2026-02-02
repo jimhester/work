@@ -37,7 +37,7 @@ cat > /tmp/rollover-summary.txt << 'EOF'
 [paste your summary here]
 EOF
 
-./work --rollover --summary-file /tmp/rollover-summary.txt
+work --rollover --summary-file /tmp/rollover-summary.txt
 ```
 
 This will:
