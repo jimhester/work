@@ -144,21 +144,23 @@ class TestTrimSession:
 class TestTrimCommand:
     """Tests for the --trim CLI command."""
 
-    def test_trim_command_requires_worker_env(self):
-        """Should error when WORK_WORKER_ID is not set."""
+    def test_trim_command_works_without_worker_env(self):
+        """Trim works outside worker sessions (doesn't error on missing WORK_WORKER_ID)."""
         from click.testing import CliRunner
 
         runner = CliRunner()
         result = runner.invoke(work.cli, ["--trim"], env={"WORK_WORKER_ID": ""})
-        assert result.exit_code != 0
-        assert "worker session" in result.output.lower() or "WORK_WORKER_ID" in result.output
+        # Should NOT error about missing worker env / WORK_WORKER_ID
+        # It may succeed (if session file exists) or fail (no session file) - both are valid
+        assert "WORK_WORKER_ID" not in result.output
+        assert "worker session" not in result.output.lower()
 
 
 class TestRolloverCommand:
     """Tests for the --rollover CLI command."""
 
-    def test_rollover_command_requires_worker_env(self, tmp_path):
-        """Should error when WORK_WORKER_ID is not set."""
+    def test_rollover_command_works_without_worker_env(self, tmp_path):
+        """Rollover works outside worker sessions (proceeds without WORK_WORKER_ID)."""
         from click.testing import CliRunner
 
         # Create a summary file
@@ -171,8 +173,9 @@ class TestRolloverCommand:
             ["--rollover", "--summary-file", str(summary_file)],
             env={"WORK_WORKER_ID": ""}
         )
-        assert result.exit_code != 0
-        assert "worker session" in result.output.lower() or "WORK_WORKER_ID" in result.output
+        # Command proceeds (doesn't error on missing WORK_WORKER_ID)
+        # It will fail later trying to sync or find session, but that's expected
+        assert "summary" in result.output.lower() or "syncing" in result.output.lower()
 
     def test_rollover_command_requires_summary_file(self):
         """Should error when --summary-file is not provided."""
