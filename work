@@ -1902,6 +1902,47 @@ def ensure_statusline_installed() -> None:
     click.echo(f"Installed status line: {statusline_dest}")
 
 
+def ensure_claude_md_directives() -> None:
+    """Ensure ~/.claude/CLAUDE.md contains superpowers skill override directives."""
+    claude_md_path = Path.home() / ".claude" / "CLAUDE.md"
+    claude_md_path.parent.mkdir(parents=True, exist_ok=True)
+
+    begin_marker = "<!-- BEGIN work-directives -->"
+    end_marker = "<!-- END work-directives -->"
+
+    directives = f"""{begin_marker}
+# Superpowers Skill Overrides
+
+## writing-plans: Always use subagent-driven development
+
+When using the writing-plans skill (or superpowers:writing-plans), after saving the plan do NOT ask which execution approach to use. Always proceed with subagent-driven development in the current session (use superpowers:subagent-driven-development). Never offer the "Parallel Session" option.
+
+## finishing-a-development-branch: Always push and create PR
+
+When using the finishing-a-development-branch skill (or superpowers:finishing-a-development-branch), after verifying tests pass do NOT present the 4 options. Always proceed directly with option 2: push the branch and create a Pull Request. Skip the menu entirely.
+{end_marker}"""
+
+    if claude_md_path.exists():
+        content = claude_md_path.read_text()
+        if begin_marker in content and end_marker in content:
+            # Update existing section
+            import re
+            pattern = re.escape(begin_marker) + r".*?" + re.escape(end_marker)
+            new_content = re.sub(pattern, directives, content, flags=re.DOTALL)
+            if new_content == content:
+                return  # Already up to date
+            claude_md_path.write_text(new_content)
+            click.echo("Updated superpowers directives in ~/.claude/CLAUDE.md")
+        else:
+            # Append section
+            separator = "\n\n" if content.strip() else ""
+            claude_md_path.write_text(content.rstrip() + separator + directives + "\n")
+            click.echo("Added superpowers directives to ~/.claude/CLAUDE.md")
+    else:
+        claude_md_path.write_text(directives + "\n")
+        click.echo("Created ~/.claude/CLAUDE.md with superpowers directives")
+
+
 def ensure_skills_installed() -> None:
     """Install work skills (trim, rollover, work) as symlinks in ~/.claude/skills/."""
     skills_dir = Path.home() / ".claude" / "skills"
@@ -2038,6 +2079,9 @@ def cmd_init(no_ai: bool = False) -> None:
 
     # Install skills (trim, rollover, work)
     ensure_skills_installed()
+
+    # Ensure superpowers skill directives in ~/.claude/CLAUDE.md
+    ensure_claude_md_directives()
 
     repo_root = get_repo_root()
     if not repo_root:
