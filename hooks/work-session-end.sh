@@ -19,6 +19,13 @@ HOOK_INPUT=$(cat)
 REASON=$(echo "$HOOK_INPUT" | jq -r '.reason // "unknown"' 2>/dev/null || echo "unknown")
 echo "$(date -u '+%Y-%m-%d %H:%M:%S') session-end hook fired for worker ${WORK_WORKER_ID} reason=${REASON}" >> /tmp/work-session-end-hook.log
 
+# Only mark as done for true session exits, not /clear or other non-terminal reasons
+# reason=clear means /clear was run (conversation reset, session continues)
+# reason=prompt_input_exit means user exited (Ctrl-C, /exit)
+if [[ "$REASON" != "prompt_input_exit" ]]; then
+    exit 0
+fi
+
 # Only mark as done if the worker isn't already done/failed
 sqlite3 "$DB_PATH" "
     UPDATE workers
