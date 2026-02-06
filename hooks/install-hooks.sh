@@ -77,6 +77,7 @@ install_single_hook() {
 install_hooks() {
     install_single_hook "work-stage-detector.sh"
     install_single_hook "work-review-guard.sh"
+    install_single_hook "work-stop.sh"
 }
 
 # Add or update a hook in settings.json
@@ -144,6 +145,18 @@ update_settings() {
     }'
     configure_hook "PreToolUse" "work-review-guard" "$pre_hook_config"
 
+    # Stop: work-stop.sh (marks worker as done on graceful shutdown)
+    local stop_hook_config='{
+        "hooks": [
+            {
+                "type": "command",
+                "command": "~/.claude/hooks/work-stop.sh",
+                "timeout": 5000
+            }
+        ]
+    }'
+    configure_hook "Stop" "work-stop" "$stop_hook_config"
+
     info "Settings updated: $SETTINGS_FILE"
 }
 
@@ -174,6 +187,9 @@ main() {
     echo "  work-review-guard.sh (PreToolUse):"
     echo "    - Blocks PR creation without passing 'work --review'"
     echo "    - Blocks PR merge without passing 'work --review --pre-merge'"
+    echo ""
+    echo "  work-stop.sh (Stop):"
+    echo "    - Marks worker as done on graceful shutdown (Ctrl-C, /exit)"
     echo ""
     echo "To uninstall, run:"
     echo "  rm ~/.claude/hooks/work-*.sh"
