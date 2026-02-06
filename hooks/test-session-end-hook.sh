@@ -1,15 +1,15 @@
 #!/bin/bash
-# test-stop-hook.sh - Test the Stop hook behavior
+# test-session-end-hook.sh - Test the SessionEnd hook behavior
 #
-# Tests that work-stop.sh correctly marks workers as done.
+# Tests that work-session-end.sh correctly marks workers as done.
 # To test signal behavior (Ctrl-C vs tab close), you need a real
 # Claude Code session - see instructions at the bottom.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-STOP_HOOK="${SCRIPT_DIR}/work-stop.sh"
-TEST_DB="/tmp/test-work-stop-$$.db"
+HOOK="${SCRIPT_DIR}/work-session-end.sh"
+TEST_DB="/tmp/test-work-session-end-$$.db"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -42,12 +42,12 @@ sqlite3 "$TEST_DB" "
     );
 "
 
-echo "=== Stop Hook Tests ==="
+echo "=== SessionEnd Hook Tests ==="
 echo ""
 
 # Test 1: Running worker gets marked done
 sqlite3 "$TEST_DB" "INSERT INTO workers (id, status, stage) VALUES (1, 'running', 'implementing')"
-WORK_WORKER_ID=1 WORK_DB_PATH="$TEST_DB" "$STOP_HOOK"
+echo '{"reason":"prompt_input_exit"}' | WORK_WORKER_ID=1 WORK_DB_PATH="$TEST_DB" "$HOOK"
 STATUS=$(sqlite3 "$TEST_DB" "SELECT status || '|' || stage FROM workers WHERE id=1")
 if [[ "$STATUS" == "done|done" ]]; then
     pass "Running worker marked as done"
@@ -58,7 +58,7 @@ fi
 # Test 2: Already-done worker is not modified
 sqlite3 "$TEST_DB" "INSERT INTO workers (id, status, stage, updated_at) VALUES (2, 'done', 'done', datetime('now', '-2 hours'))"
 OLD_TIME=$(sqlite3 "$TEST_DB" "SELECT updated_at FROM workers WHERE id=2")
-WORK_WORKER_ID=2 WORK_DB_PATH="$TEST_DB" "$STOP_HOOK"
+echo '{"reason":"prompt_input_exit"}' | WORK_WORKER_ID=2 WORK_DB_PATH="$TEST_DB" "$HOOK"
 NEW_TIME=$(sqlite3 "$TEST_DB" "SELECT updated_at FROM workers WHERE id=2")
 if [[ "$OLD_TIME" == "$NEW_TIME" ]]; then
     pass "Already-done worker not modified"
@@ -69,7 +69,7 @@ fi
 # Test 3: Already-failed worker is not modified
 sqlite3 "$TEST_DB" "INSERT INTO workers (id, status, stage, updated_at) VALUES (3, 'failed', 'exploring', datetime('now', '-2 hours'))"
 OLD_TIME=$(sqlite3 "$TEST_DB" "SELECT updated_at FROM workers WHERE id=3")
-WORK_WORKER_ID=3 WORK_DB_PATH="$TEST_DB" "$STOP_HOOK"
+echo '{"reason":"prompt_input_exit"}' | WORK_WORKER_ID=3 WORK_DB_PATH="$TEST_DB" "$HOOK"
 NEW_TIME=$(sqlite3 "$TEST_DB" "SELECT updated_at FROM workers WHERE id=3")
 if [[ "$OLD_TIME" == "$NEW_TIME" ]]; then
     pass "Already-failed worker not modified"
@@ -79,7 +79,7 @@ fi
 
 # Test 4: No WORK_WORKER_ID exits cleanly
 unset WORK_WORKER_ID
-OUTPUT=$("$STOP_HOOK" 2>&1) || true
+OUTPUT=$(echo '{"reason":"other"}' | "$HOOK" 2>&1) || true
 pass "No WORK_WORKER_ID exits without error"
 
 echo ""
@@ -92,13 +92,14 @@ fi
 echo ""
 echo "=== Manual Signal Testing ==="
 echo ""
-echo "To test which signals trigger the Stop hook, start a worker:"
-echo "  work --here <issue>"
+echo "To test which exit methods trigger the SessionEnd hook,"
+echo "start a worker and check /tmp/work-session-end-hook.log after each:"
 echo ""
-echo "Then try each and check 'work --status' afterwards:"
-echo "  1. Ctrl-C        (sends SIGINT)"
-echo "  2. Close the tab  (sends SIGHUP)"
-echo "  3. /exit          (graceful exit)"
+echo "  1. work --here <issue>  then Ctrl-C     (reason: prompt_input_exit)"
+echo "  2. work <issue>         then close tab   (reason: other)"
+echo "  3. work --here <issue>  then /exit       (reason: prompt_input_exit)"
+echo ""
+echo "  cat /tmp/work-session-end-hook.log"
 echo ""
 
 exit $FAILURES
