@@ -645,8 +645,12 @@ def db_store_completion(
 
 
 def db_mark_failed(worker_id: int, reason: str = "unknown") -> None:
-    """Mark worker as failed."""
-    db_update_status(worker_id, "failed")
+    """Mark worker as failed without updating the activity timestamp."""
+    with get_db() as conn:
+        conn.execute(
+            "UPDATE workers SET status='failed' WHERE id=?",
+            (worker_id,)
+        )
     db_log_event(worker_id, "failed", reason)
 
 
@@ -2399,7 +2403,7 @@ def cmd_status():
         icon, _ = _status_icon(row['stage'], row['status'])
         issue = f"#{row['issue']}" if row['issue'] != '-' else '-'
         pr = f"PR #{row['pr_number']}" if row['pr_number'] else "—"
-        stage = row['stage'] or '-'
+        stage = 'failed' if row['status'] == 'failed' else (row['stage'] or '-')
         activity = _format_activity(row['mins_idle'], row['stage'], row['status'])
         # Truncate branch name for display
         branch = row['branch'][:20] if row['branch'] else '-'
