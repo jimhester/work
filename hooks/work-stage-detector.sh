@@ -53,6 +53,10 @@ if [[ -z "${WORK_WORKER_ID:-}" ]]; then
     exit 0
 fi
 
+# Update heartbeat timestamp on every tool use
+DB_PATH="${WORK_DB_PATH:-${HOME}/.worktrees/work-sessions.db}"
+sqlite3 "$DB_PATH" "UPDATE workers SET updated_at=datetime('now') WHERE id=${WORK_WORKER_ID}" 2>/dev/null &
+
 # Extract tool info using jq
 TOOL_NAME=$(echo "$HOOK_INPUT" | jq -r '.tool_name // empty')
 
