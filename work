@@ -1394,22 +1394,26 @@ Read CLAUDE.md first for project conventions, test commands, and labels.
 ## Workflow
 
 ### 1. Understand & Plan
+- Run `work --stage planning` when you begin planning
 - Read the issue/requirements thoroughly{jira_phase1_note}
 - For complex tasks: use `superpowers:brainstorming` to explore the problem space
 - Use `superpowers:writing-plans` to create a detailed implementation plan
 - Plans should have bite-sized tasks (2-5 min each) with exact file paths and code
 
 ### 2. Implement
+- Run `work --stage implementing` when you start writing code
 - Follow `superpowers:test-driven-development` strictly: RED -> GREEN -> REFACTOR
 - Write failing test first, then minimal code to pass, then refactor
 - If you hit bugs: use `superpowers:systematic-debugging` (investigate before fixing)
 - Request code review between major steps: `superpowers:requesting-code-review`
 
 ### 3. Verify & Self-Review
+- Run `work --stage testing` when you start running tests
 - Use `superpowers:verification-before-completion` - run ALL tests, read output, confirm passing
 - Only after verification passes: run `work --review` (required gate for PR creation)
 
 ### 4. Create PR
+- Run `work --stage pr_creating` before creating the PR
 - `{gh_cli} pr create{repo_flag}`
 
 ### 5. CI Loop
@@ -1417,6 +1421,7 @@ Read CLAUDE.md first for project conventions, test commands, and labels.
 - If failures: debug with `superpowers:systematic-debugging`, fix, push, repeat
 
 ### 6. Address Review Feedback
+- Run `work --stage review_responding` when addressing feedback
 - Use `superpowers:receiving-code-review` - technical rigor, not blind agreement
 - Push back on incorrect feedback with evidence
 - After changes: run `superpowers:verification-before-completion` again
@@ -1459,21 +1464,25 @@ Read CLAUDE.md first for project conventions, test commands, and labels.
 ## Workflow
 
 ### 1. Read and Understand the Plan
+- Run `work --stage planning` when you begin reviewing the plan
 - Read the plan file thoroughly: `{plan_path}`
 - Understand the goals, tasks, and expected outcomes
 - Identify any dependencies between tasks
 
 ### 2. Execute Tasks
+- Run `work --stage implementing` when you start writing code
 - Follow `superpowers:executing-plans` for batch execution with checkpoints
 - Use `superpowers:test-driven-development` strictly: RED -> GREEN -> REFACTOR
 - If you hit bugs: use `superpowers:systematic-debugging` (investigate before fixing)
 - Request code review between major steps: `superpowers:requesting-code-review`
 
 ### 3. Verify & Self-Review
+- Run `work --stage testing` when you start running tests
 - Use `superpowers:verification-before-completion` - run ALL tests, read output, confirm passing
 - Only after verification passes: run `work --review` (required gate for PR creation)
 
 ### 4. Create PR
+- Run `work --stage pr_creating` before creating the PR
 - `{gh_cli} pr create`
 - Reference the plan in the PR description
 
@@ -1482,6 +1491,7 @@ Read CLAUDE.md first for project conventions, test commands, and labels.
 - If failures: debug with `superpowers:systematic-debugging`, fix, push, repeat
 
 ### 6. Address Review Feedback
+- Run `work --stage review_responding` when addressing feedback
 - Use `superpowers:receiving-code-review` - technical rigor, not blind agreement
 - After changes: run `superpowers:verification-before-completion` again
 
