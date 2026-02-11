@@ -1166,6 +1166,31 @@ def find_existing_worktree(branch: str) -> Optional[Path]:
     return None
 
 
+def setup_worktree_local_files(worktree_path: Path, source_repo: Optional[Path] = None) -> None:
+    """Symlink claude.local.md from the source repo's Claude project dir into a worktree.
+
+    This makes local (non-committed) Claude instructions available in worktrees.
+    Looks for claude.local.md in ~/.claude/projects/<encoded-source-path>/.
+    """
+    source = source_repo or get_main_repo_root()
+    if not source:
+        return
+
+    # Encode the source repo path the same way Claude Code does
+    claude_dir_name = str(source).replace("/.", "--").replace("/", "-")
+    local_md = Path.home() / ".claude" / "projects" / claude_dir_name / "claude.local.md"
+
+    if not local_md.exists():
+        return
+
+    target = worktree_path / "claude.local.md"
+    if target.exists() or target.is_symlink():
+        return
+
+    target.symlink_to(local_md)
+    click.echo(f"  Linked claude.local.md into worktree")
+
+
 def find_claude_session(worktree_path: str) -> Optional[str]:
     """Find the most recent Claude session ID for a worktree path."""
     # Transform worktree path to Claude projects directory name
@@ -2738,6 +2763,9 @@ def cmd_plan(plan_file: str, here: bool = False):
             if not copy_plan_to_worktree(absolute_plan_path, relative_plan_path, worktree_path):
                 click.echo("Warning: Could not copy plan file. Plan may not be available.")
 
+    # Symlink local Claude instructions into worktree
+    setup_worktree_local_files(worktree_path)
+
     # Generate plan-specific prompt
     prompt = generate_plan_prompt(str(relative_plan_path), gh_cli)
 
@@ -3492,6 +3520,9 @@ def run_here(input_str: str, description: Optional[str] = None):
                 ["git", "worktree", "add", "-b", branch_name, str(worktree_path), f"origin/{config.main_branch}"],
                 check=True
             )
+
+    # Symlink local Claude instructions into worktree
+    setup_worktree_local_files(worktree_path)
 
     # Build task reference
     task_ref = ""
