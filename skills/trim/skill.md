@@ -3,28 +3,41 @@ name: trim
 description: Trim large tool outputs to free context space
 ---
 
-To free context space, run:
+# Trim Session Context
 
-```bash
-./work --trim
-```
+Trimming creates a new session file with large tool outputs truncated, typically saving 30-50% context.
 
-This will:
-1. Sync current session to episodic-memory (preserve full content)
-2. Find tool outputs over 500 characters (configurable in .work.toml)
-3. Truncate them, keeping first 500 chars + reference to original
-4. Create new session file with trim metadata
-5. Output resume command for the trimmed session
+**IMPORTANT:** Trimming requires exiting and resuming. The current session cannot be trimmed in-place.
 
-**Typical savings:** 30-50% on first trim.
+## Steps
 
-**After trimming:**
-- Run `claude --resume <session-id>` with the ID shown
-- If you need full content of a truncated result, re-run the tool or search episodic-memory
+1. **Run the trim command:**
+   ```bash
+   work --trim
+   ```
 
-**If trimming doesn't free meaningful space (<10% saved), use `/rollover` instead.**
+2. **Tell the user to exit and resume.** After the command runs, you MUST clearly instruct:
+   > I've created a trimmed version of this session. To continue with reduced context:
+   > 1. Exit this session (press `Ctrl+C` or type `/exit`)
+   > 2. Run: `claude --resume <session-id>` (using the ID shown above)
+   >
+   > The trimmed session preserves our conversation but truncates large tool outputs.
+   > If you need full content of something that was truncated, I can re-run the tool or search episodic-memory.
 
-**Configuration** (`.work.toml`):
+## When to Use
+
+- Context is 60-80% full and you want to continue the current task
+- You have large tool outputs (file reads, grep results) that are no longer needed in full
+
+## When to Use /rollover Instead
+
+- Context is >85% full (trim may not free enough space)
+- You're starting a new phase of work and want a clean handoff
+- Trim savings would be <10%
+
+## Configuration
+
+In `.work.toml`:
 ```toml
 [context]
 trim_threshold_chars = 500           # Characters to keep before truncating

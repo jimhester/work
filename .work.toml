@@ -1,0 +1,93 @@
+# .work.toml - Work agent configuration
+# See: https://github.com/jimhester/dotfiles/blob/main/genai/work
+# Generated from CLAUDE.md
+
+# Additional instructions appended to the worker prompt.
+worker_guidelines = """
+## Project-Specific Guidelines
+
+### GitHub CLI
+- Use `gh` for standard GitHub operations
+- Use `ghe` for github.netflix.net remotes (auto-detected by the work tool)
+
+### Development Commands
+```bash
+# Run the main script (uv handles dependencies automatically)
+./work <issue-number>
+
+# Test the review guard hook
+./hooks/test-review-hook.sh
+
+# Install hooks
+./hooks/install-hooks.sh
+```
+
+### Validation Order Before Committing
+1. Ensure Python syntax is valid (no syntax errors in `work` script)
+2. Test hook scripts with `./hooks/test-review-hook.sh`
+3. Verify shell scripts have correct syntax: `bash -n <script.sh>`
+4. Test basic CLI operations: `./work --help`, `./work --status`
+
+### Project Conventions
+- The `work` script uses inline uv script metadata (`uv run --script`)
+- Python version: >= 3.11
+- Dependencies: click >= 8.0, tomli >= 2.0
+- Hooks require: `jq`, `sqlite3`
+- Worker data stored in SQLite at `~/.worktrees/work-sessions.db`
+- Worktrees created at `~/.worktrees/{repo}/{branch}`
+
+### Environment Variables
+- `WORK_WORKER_ID`: Set for worker sessions
+- `WORK_DB_PATH`: Path to SQLite database
+
+### Worker Stages
+Valid stages: `exploring`, `planning`, `implementing`, `testing`, `pr_creating`, `ci_waiting`, `review_waiting`, `review_responding`, `merge_conflicts`, `done`, `blocked`
+
+### Issue Labels for Follow-up Work
+- Use appropriate labels when creating follow-up issues
+- Document any blocked or incomplete work in issue comments
+"""
+
+# Custom review guidelines for self-review.
+review_guidelines = """
+## Code Review Checklist
+
+### Shell Scripts (hooks/)
+- [ ] Scripts are executable and have proper shebang
+- [ ] `jq` and `sqlite3` commands use correct syntax
+- [ ] Error handling for missing files/commands
+- [ ] Proper quoting of variables to prevent word splitting
+- [ ] Exit codes are meaningful
+
+### Python Code (work script)
+- [ ] Click decorators and options are correctly defined
+- [ ] SQLite queries are parameterized (no SQL injection)
+- [ ] File paths use proper escaping/quoting
+- [ ] Error messages are user-friendly
+- [ ] Inline script metadata is valid TOML
+
+### Database Operations
+- [ ] Schema changes are backwards compatible
+- [ ] Queries handle missing/null data gracefully
+- [ ] Transactions used where appropriate
+
+### Hook System
+- [ ] PostToolUse hooks don't block execution unnecessarily
+- [ ] PreToolUse hooks provide clear error messages when blocking
+- [ ] Stage transitions follow valid stage progression
+- [ ] `.work-review-status` file handling is correct
+
+### What to Ignore
+- Pre-existing code style issues outside changed lines
+- Lock file changes
+- Formatting in unchanged code sections
+"""
+
+# Review strictness: "strict", "normal", or "lenient"
+# - strict: Flag anything that could potentially be an issue
+# - normal: Balanced (default)
+# - lenient: Only flag clear, obvious bugs
+review_strictness = "normal"
+
+# Whether to require review before merge (in addition to before PR)
+require_pre_merge_review = true
