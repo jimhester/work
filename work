@@ -2272,6 +2272,10 @@ If no issues: Output exactly "APPROVED" on its own line.
             stdin=subprocess.DEVNULL  # Prevent hanging in background tasks
         )
         output = result.stdout
+        if not output.strip() and result.stderr:
+            output = f"[Review command stderr]\n{result.stderr}"
+        if result.returncode != 0 and not output.strip():
+            output = f"[Review command failed with exit code {result.returncode}]"
 
     click.echo(output)
 
