@@ -150,7 +150,8 @@ render_worker_status() {
     worker_info=$(sqlite3 -separator '|' "$DB_PATH" "
         SELECT COALESCE(jira_key, CAST(issue_number AS TEXT), '?'),
                COALESCE(pr_number, 0),
-               COALESCE(stage, 'unknown')
+               COALESCE(stage, 'unknown'),
+               COALESCE(repo_name, '')
         FROM workers
         WHERE id = $worker_id
         LIMIT 1
@@ -158,10 +159,14 @@ render_worker_status() {
 
     [[ -z "$worker_info" ]] && return 1
 
-    local issue pr_num stage
-    IFS='|' read -r issue pr_num stage <<< "$worker_info"
+    local issue pr_num stage repo_name
+    IFS='|' read -r issue pr_num stage repo_name <<< "$worker_info"
 
-    local parts="${C_MAGENTA}#${issue}${C_RESET}"
+    local parts=""
+    if [[ -n "$repo_name" ]]; then
+        parts+="${C_BLUE}${repo_name}${C_RESET} "
+    fi
+    parts+="${C_MAGENTA}#${issue}${C_RESET}"
     if [[ "$pr_num" != "0" && -n "$pr_num" ]]; then
         parts+=" ${C_GRAY}→${C_RESET} ${C_GREEN}PR #${pr_num}${C_RESET}"
     fi
