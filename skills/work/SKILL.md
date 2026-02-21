@@ -120,7 +120,7 @@ Workers report their current stage for better visibility. Stages are:
 Workers update their stage via:
 ```bash
 work --stage implementing      # Set current stage
-work --stage ci_waiting --pr 47  # Set stage with PR number
+work --pr 47                   # Register PR (auto-sets stage to ci_waiting, URL auto-detected)
 ```
 
 ## Parent-to-Worker Messaging

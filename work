@@ -1608,7 +1608,7 @@ def extract_plan_name(plan_path: str) -> str:
 @click.option('--quiet', is_flag=True, help='Suppress output when no messages (for hooks)')
 @click.option('--stage', 'set_stage', help='Set worker stage')
 @click.option('--done', 'mark_done', is_flag=True, help='Mark worker as done')
-@click.option('--pr', 'set_pr', nargs=2, help='Register PR number and URL')
+@click.option('--pr', 'set_pr', help='Register PR number (URL auto-detected via gh)')
 @click.option('--event', 'log_event', nargs=2, help='Log an event (type, message)')
 @click.option('--transition', nargs=3, help='Transition status, phase, stage')
 @click.option('--type', 'msg_type', default='info', help='Message type for --send')
@@ -1661,7 +1661,7 @@ def cli(ctx, issues, here, show_status, show_events, show_logs, do_stop, do_send
       work --messages [issue] --peek   # View without marking as read
       work --stage <stage> [issue]     # Set worker stage
       work --done [issue]              # Mark worker as done
-      work --pr <number> <url> [issue] # Register PR for worker
+      work --pr <number> [issue]       # Register PR for worker
       work --event <type> <msg> [issue] # Log an event
       work --resume [issues...]        # Resume crashed/stopped worker(s)
       work --resume                    # Interactive picker for resuming
@@ -1750,9 +1750,8 @@ def cli(ctx, issues, here, show_status, show_events, show_logs, do_stop, do_send
         return
 
     if set_pr:
-        pr_number, pr_url = set_pr
         issue = issues[0] if issues else None
-        cmd_pr(int(pr_number), pr_url, issue)
+        cmd_pr(int(set_pr), None, issue)
         return
 
     if log_event:
@@ -3119,9 +3118,23 @@ def cmd_done(issue: Optional[str] = None):
     click.echo("Worker marked as done.")
 
 
-def cmd_pr(pr_number: int, pr_url: str, issue: Optional[str] = None):
+def cmd_pr(pr_number: int, pr_url: Optional[str] = None, issue: Optional[str] = None):
     """Register PR for worker."""
     init_db()
+
+    # Auto-derive URL if not provided
+    if not pr_url:
+        try:
+            result = subprocess.run(
+                ["gh", "pr", "view", str(pr_number), "--json", "url", "-q", ".url"],
+                capture_output=True, text=True, timeout=15
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                pr_url = result.stdout.strip()
+            else:
+                pr_url = ""
+        except Exception:
+            pr_url = ""
 
     worker_id = None
     if issue:

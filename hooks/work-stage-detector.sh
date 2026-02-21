@@ -86,7 +86,7 @@ if [[ "$COMMAND" =~ gh[e]?[[:space:]]+pr[[:space:]]+create ]] && [[ "$EXIT_CODE"
         # Extract PR number from URL
         PR_NUMBER=$(echo "$PR_URL" | grep -oE '[0-9]+$')
         if [[ -n "$PR_NUMBER" ]]; then
-            "$WORK_SCRIPT" --pr "$PR_NUMBER" "$PR_URL" >/dev/null 2>&1 || true
+            "$WORK_SCRIPT" --pr "$PR_NUMBER" >/dev/null 2>&1 || true
         fi
     fi
 
