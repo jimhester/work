@@ -35,8 +35,26 @@ else
     exit 0
 fi
 
-# Find repo root
-REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || true)
+# Find repo root - if the command starts with 'cd <dir> &&', use that directory
+# so we resolve the correct worktree (the hook runs in the shell's cwd, not the
+# cd target).
+CMD_DIR=""
+if [[ "$COMMAND" =~ ^[[:space:]]*cd[[:space:]]+([^&]+)[[:space:]]*\&\& ]]; then
+    CMD_DIR="${BASH_REMATCH[1]}"
+    # Strip surrounding quotes if present
+    CMD_DIR="${CMD_DIR%\"}"
+    CMD_DIR="${CMD_DIR#\"}"
+    CMD_DIR="${CMD_DIR%\'}"
+    CMD_DIR="${CMD_DIR#\'}"
+    # Trim trailing whitespace
+    CMD_DIR="${CMD_DIR%"${CMD_DIR##*[![:space:]]}"}"
+fi
+
+if [[ -n "$CMD_DIR" && -d "$CMD_DIR" ]]; then
+    REPO_ROOT=$(git -C "$CMD_DIR" rev-parse --show-toplevel 2>/dev/null || true)
+else
+    REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || true)
+fi
 if [[ -z "$REPO_ROOT" ]]; then
     exit 0  # Not in a git repo, let it proceed
 fi
@@ -62,7 +80,7 @@ EOF
 fi
 
 # Check if review is newer than last commit
-LAST_COMMIT_TIME=$(git log -1 --format=%ct 2>/dev/null || echo "0")
+LAST_COMMIT_TIME=$(git -C "$REPO_ROOT" log -1 --format=%ct 2>/dev/null || echo "0")
 REVIEW_TIME=$(stat -c %Y "$REVIEW_MARKER" 2>/dev/null || stat -f %m "$REVIEW_MARKER" 2>/dev/null || echo "0")
 
 if [[ "$REVIEW_TIME" -lt "$LAST_COMMIT_TIME" ]]; then
