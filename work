@@ -2265,10 +2265,14 @@ If no issues: Output exactly "APPROVED" on its own line.
         else:
             output = "- [HIGH] example.py:42 - Potential null pointer dereference\n- [MEDIUM] utils.py:10 - Missing error handling"
     else:
+        # Unset CLAUDECODE to allow claude --print from within a worker session.
+        # --print is non-interactive (one-shot API call), so nested session concerns don't apply.
+        env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
         result = subprocess.run(
             ["claude", "--print", "-p", prompt],
             capture_output=True, text=True,
-            stdin=subprocess.DEVNULL  # Prevent hanging in background tasks
+            stdin=subprocess.DEVNULL,  # Prevent hanging in background tasks
+            env=env,
         )
         output = result.stdout
         if not output.strip() and result.stderr:
