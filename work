@@ -143,15 +143,7 @@ def load_work_config() -> WorkConfig:
 
 # Default review guidelines (used when not overridden in config)
 DEFAULT_REVIEW_GUIDELINES = """
-Focus on bugs actually introduced by these changes:
-
-1. **Logic errors**: Off-by-one, null/undefined handling, incorrect conditions
-2. **Security**: Injection vulnerabilities, auth bypasses, data exposure
-3. **Resource leaks**: Unclosed files, connections, memory
-4. **Error handling**: Unhandled exceptions, missing validation
-5. **Breaking changes**: Public API modifications without backwards compatibility
-
-Ignore: Style/formatting, pre-existing issues, minor nitpicks.
+Focus on bugs actually introduced by these changes. Ignore style/formatting, pre-existing issues, and minor nitpicks.
 """
 
 
