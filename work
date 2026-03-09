@@ -2243,11 +2243,43 @@ def cmd_review(pre_merge: bool = False, dry_run: Optional[str] = None) -> None:
 {strictness_note}
 {pre_merge_note}
 
-## Output Format
-If issues found, list each as:
-- [HIGH/MEDIUM/LOW] file:line - description
+## Review Axes
+Evaluate each axis independently. For each, state whether you found a concrete issue or not.
 
-If no issues: Output exactly "APPROVED" on its own line.
+1. **Correctness**: Logic errors, off-by-one, null handling, incorrect conditions, edge cases
+2. **Security**: Injection, auth bypasses, data exposure, resource leaks
+3. **CLAUDE.md Compliance**: Do the changes violate any guidance in the Project Context above?
+4. **Error Handling**: Unhandled exceptions, missing validation, silent failures
+5. **Breaking Changes**: Public API modifications, backwards compatibility
+
+## Assumptions Rule
+If your feedback relies on an assumption about the deployment environment, runtime behavior, or
+design intent, state that assumption explicitly. Use the form: "IF [assumption], THEN [concern]."
+Do not state environment-dependent concerns as definite bugs. You can only review what is shown —
+do not flag an issue based solely on something being removed or absent unless the remaining code
+demonstrably requires it.
+
+## Output Format
+Always provide a full review with the following sections:
+
+### Summary
+Brief description of what the changes do (1-2 sentences).
+
+### Axes
+For each axis, write one line:
+- PASS axis_name: brief reason (or "no issues found")
+- FAIL axis_name: [HIGH/MEDIUM/LOW] file:line - description
+
+### Issues
+Consolidate all FAIL items here with full detail. For each:
+- [HIGH/MEDIUM/LOW] file:line - description
+- If the issue relies on an assumption, state it: "IF [assumption], THEN [concern]."
+
+If no issues across all axes, write: "No issues found."
+
+### Verdict
+If no issues: Write "APPROVED" on its own line.
+If issues found: Write "ISSUES_FOUND" on its own line.
 
 ## Diff to Review
 ```diff
@@ -2261,9 +2293,9 @@ If no issues: Output exactly "APPROVED" on its own line.
     if dry_run:
         click.echo(f"[DRY-RUN MODE: simulating '{dry_run}']")
         if dry_run == "pass":
-            output = "No issues found in the code changes.\n\nAPPROVED"
+            output = "### Summary\nDry-run review of code changes.\n\n### Axes\n- PASS correctness: no issues found\n- PASS security: no issues found\n- PASS claude_md_compliance: no issues found\n- PASS error_handling: no issues found\n- PASS breaking_changes: no issues found\n\n### Issues\nNo issues found.\n\n### Verdict\nAPPROVED"
         else:
-            output = "- [HIGH] example.py:42 - Potential null pointer dereference\n- [MEDIUM] utils.py:10 - Missing error handling"
+            output = "### Summary\nDry-run review of code changes.\n\n### Axes\n- PASS correctness: no issues found\n- FAIL security: [HIGH] example.py:42 - Potential null pointer dereference\n- PASS claude_md_compliance: no issues found\n- FAIL error_handling: [MEDIUM] utils.py:10 - Missing error handling\n- PASS breaking_changes: no issues found\n\n### Issues\n- [HIGH] example.py:42 - Potential null pointer dereference\n- [MEDIUM] utils.py:10 - Missing error handling\n\n### Verdict\nISSUES_FOUND"
     else:
         # Unset CLAUDECODE to allow claude --print from within a worker session.
         # --print is non-interactive (one-shot API call), so nested session concerns don't apply.
