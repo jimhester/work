@@ -78,6 +78,9 @@ install_hooks() {
     install_single_hook "work-stage-detector.sh"
     install_single_hook "work-review-guard.sh"
     install_single_hook "work-session-end.sh"
+    install_single_hook "work-worktree-create.sh"
+    install_single_hook "work-worktree-remove.sh"
+    install_single_hook "work-stop-failure.sh"
 }
 
 # Add or update a hook in settings.json
@@ -157,6 +160,42 @@ update_settings() {
     }'
     configure_hook "SessionEnd" "work-session-end" "$session_end_hook_config"
 
+    # WorktreeCreate: work-worktree-create.sh (creates worktrees in ~/.worktrees/)
+    local worktree_create_config='{
+        "hooks": [
+            {
+                "type": "command",
+                "command": "~/.claude/hooks/work-worktree-create.sh",
+                "timeout": 15000
+            }
+        ]
+    }'
+    configure_hook "WorktreeCreate" "work-worktree-create" "$worktree_create_config"
+
+    # WorktreeRemove: work-worktree-remove.sh (removes worktrees and their branches)
+    local worktree_remove_config='{
+        "hooks": [
+            {
+                "type": "command",
+                "command": "~/.claude/hooks/work-worktree-remove.sh",
+                "timeout": 10000
+            }
+        ]
+    }'
+    configure_hook "WorktreeRemove" "work-worktree-remove" "$worktree_remove_config"
+
+    # StopFailure: work-stop-failure.sh (marks worker failed on model errors)
+    local stop_failure_config='{
+        "hooks": [
+            {
+                "type": "command",
+                "command": "~/.claude/hooks/work-stop-failure.sh",
+                "timeout": 5000
+            }
+        ]
+    }'
+    configure_hook "StopFailure" "work-stop-failure" "$stop_failure_config"
+
     info "Settings updated: $SETTINGS_FILE"
 }
 
@@ -190,6 +229,19 @@ main() {
     echo ""
     echo "  work-session-end.sh (SessionEnd):"
     echo "    - Marks worker as done when session exits (Ctrl-C, /exit, tab close)"
+    echo ""
+    echo "  work-worktree-create.sh (WorktreeCreate):"
+    echo "    - Creates worktrees in ~/.worktrees/{repo}/{name} (work's convention)"
+    echo "    - Symlinks claude.local.md into each worktree"
+    echo "    - Used by isolation: worktree subagents and /worktree tool"
+    echo ""
+    echo "  work-worktree-remove.sh (WorktreeRemove):"
+    echo "    - Removes worktrees and their worktree-* branches"
+    echo "    - Prunes stale git worktree metadata"
+    echo ""
+    echo "  work-stop-failure.sh (StopFailure):"
+    echo "    - Marks worker as failed on model errors (rate limits, overload, API errors)"
+    echo "    - Logs error details to events table (visible via work --events)"
     echo ""
     echo "To uninstall, run:"
     echo "  rm ~/.claude/hooks/work-*.sh"
