@@ -350,15 +350,16 @@ class TestGetGitRemotes:
         assert len(remotes) == 1
         assert remotes[0][0] == "origin"
 
-    def test_dedupes_fetch_and_push(self, tmp_path, monkeypatch):
-        # `git remote -v` outputs each remote twice (fetch and push)
+    def test_one_entry_per_remote(self, tmp_path, monkeypatch):
+        # Underlying ``git config --get-regexp remote\..*\.url`` emits a
+        # single line per remote (unlike ``git remote -v`` which prints
+        # fetch+push). Guard against regression if this is ever rewritten.
         repo = _init_git_repo_with_remotes(
             tmp_path,
             {"origin": "https://github.com/owner/repo.git"},
         )
         monkeypatch.chdir(repo)
         remotes = work.get_git_remotes()
-        # Should dedupe to a single entry
         assert len(remotes) == 1
 
 

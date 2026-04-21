@@ -1175,6 +1175,7 @@ def validate_issues_before_spawn(
     gh_host = os.environ.get("GH_HOST")
     failures: list[str] = []
     resolved_repos: set[str] = set()
+    validated_count = 0
 
     for raw in issues:
         # Skip obvious non-GitHub inputs
@@ -1195,6 +1196,7 @@ def validate_issues_before_spawn(
                 )
             else:
                 resolved_repos.add(target)
+                validated_count += 1
             continue
 
         # Bare number or owner/name:N / host/owner/name:N
@@ -1237,6 +1239,7 @@ def validate_issues_before_spawn(
             )
         else:
             resolved_repos.add(target)
+            validated_count += 1
 
     if failures:
         repo_list = (
@@ -1251,9 +1254,9 @@ def validate_issues_before_spawn(
             "repo, or set GH_HOST to disambiguate."
         )
 
-    if resolved_repos:
+    if validated_count:
         click.echo(
-            f"Validated {len(issues)} issue(s) against: "
+            f"Validated {validated_count} issue(s) against: "
             f"{', '.join(sorted(resolved_repos))}"
         )
 
@@ -3221,6 +3224,7 @@ def run_here(
     jira_key: Optional[str] = None
     branch_name: Optional[str] = None
     issue_source = "github"
+    gh_cli: Optional[str] = None  # Set in each code path below
 
     # Try JIRA first (if acli available), then GitHub
     jira_key = parse_jira_key(input_str)
@@ -3322,8 +3326,9 @@ def run_here(
             branch_name = f"feature-{slugify(description)}"
             click.echo(f"Will create feature branch: {branch_name}")
 
-    # gh_cli for downstream code paths when we don't have a host yet
-    if 'gh_cli' not in locals():
+    # Fall back to remote-based CLI detection for JIRA/description paths
+    # where no GitHub host was resolved above.
+    if gh_cli is None:
         gh_cli = detect_gh_cli(input_str)
 
     if not branch_name:
