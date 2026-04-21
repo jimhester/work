@@ -1087,6 +1087,16 @@ def _build_work_invocation(
     )
 
 
+def _escape_for_applescript(s: str) -> str:
+    """Escape a string for embedding in an AppleScript double-quoted literal.
+
+    ``shlex.quote`` output can contain ``"`` (e.g. ``'O'"'"'Brian'``),
+    which would prematurely close the AppleScript string. Backslashes
+    also need escaping because AppleScript treats ``\\`` as an escape.
+    """
+    return s.replace("\\", "\\\\").replace('"', '\\"')
+
+
 def spawn_iterm2(
     issue: str,
     script_path: Path,
@@ -1098,13 +1108,14 @@ def spawn_iterm2(
     env_str = f"{env_prefix} " if env_prefix else ""
     invocation = _build_work_invocation(issue, script_path, repo_override)
     cmd = f"cd {shlex.quote(str(cwd))} && {env_str}{invocation}"
+    cmd_for_applescript = _escape_for_applescript(cmd)
 
     applescript = f'''
 tell application "iTerm2"
     tell current window
         create tab with default profile
         tell current session
-            write text "{cmd}"
+            write text "{cmd_for_applescript}"
         end tell
     end tell
 end tell

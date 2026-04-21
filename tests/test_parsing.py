@@ -534,6 +534,23 @@ class TestSpawnInvocation:
         prefix = work._build_spawn_env_prefix()
         assert prefix == ""
 
+    def test_applescript_escape_doubles_quotes_and_backslashes(self):
+        # `shlex.quote` wraps values with single quotes that embed
+        # literal double quotes (e.g. `'O'"'"'Brian'`). Those double
+        # quotes must be escaped before being dropped into an
+        # AppleScript `write text "..."` literal, or the string ends
+        # early.
+        raw = "echo 'O'\"'\"'Brian' && path\\with\\backslash"
+        escaped = work._escape_for_applescript(raw)
+        # Double quotes are preceded by a backslash, backslashes are doubled
+        assert '\\"' in escaped
+        assert "\\\\" in escaped
+        # The escaped form must not contain an unescaped "
+        # (i.e. every " in the escaped string is preceded by \)
+        for i, ch in enumerate(escaped):
+            if ch == '"':
+                assert escaped[i - 1] == "\\"
+
 
 class TestValidateIssuesBeforeSpawn:
     """Tests for the upfront issue validation that prevents spawning
