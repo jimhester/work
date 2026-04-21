@@ -256,6 +256,19 @@ class TestParseRemoteUrl:
         assert work.parse_remote_url("https://gitlab.com/owner/repo.git") is None
         assert work.parse_remote_url("https://bitbucket.org/owner/repo.git") is None
 
+    def test_lookalike_github_host_rejected(self):
+        # Substring-like hostnames must NOT be accepted — the allowlist
+        # requires an exact match or a subdomain of an allowed host.
+        assert work.parse_remote_url(
+            "https://notgithub.com/owner/repo.git"
+        ) is None
+        assert work.parse_remote_url(
+            "https://github.com.attacker.net/owner/repo.git"
+        ) is None
+        assert work.parse_remote_url(
+            "https://mygithub.corp.example/owner/repo.git"
+        ) is None
+
     def test_invalid_url_returns_none(self):
         assert work.parse_remote_url("not a url") is None
         assert work.parse_remote_url("") is None
@@ -559,10 +572,12 @@ class TestSpawnInvocation:
         assert '\\"' in escaped
         assert "\\\\" in escaped
         # The escaped form must not contain an unescaped "
-        # (i.e. every " in the escaped string is preceded by \)
+        # (i.e. every " in the escaped string is preceded by \).
+        # Guard ``i > 0`` so a leading ``"`` (which would wrap to index -1)
+        # still counts as unescaped instead of silently passing.
         for i, ch in enumerate(escaped):
             if ch == '"':
-                assert escaped[i - 1] == "\\"
+                assert i > 0 and escaped[i - 1] == "\\"
 
 
 class TestValidateIssuesBeforeSpawn:

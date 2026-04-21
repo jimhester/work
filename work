@@ -667,8 +667,11 @@ def parse_remote_url(url: str) -> Optional[tuple[str, str, str]]:
         return None
 
     host = match.group(1)
-    # Only recognize known GitHub hosts
-    if 'github' not in host:
+    # Allowlist of GitHub hosts — anything else is out of scope for
+    # auto-detection. Users on custom GHE hosts can still pass an
+    # explicit ``--repo host/owner/name`` or a full issue URL.
+    allowed = ("github.com", "github.netflix.net")
+    if not any(host == h or host.endswith("." + h) for h in allowed):
         return None
     return host, match.group(2), match.group(3)
 
@@ -1195,8 +1198,11 @@ def validate_issues_before_spawn(
 
         parsed_url = parse_github_url(raw)
         if parsed_url:
+            # ``parse_github_url`` already required a valid https?:// host,
+            # so this match is guaranteed to succeed.
             url_host_match = re.match(r'https?://(?:www\.)?([^/]+)', raw)
-            host = url_host_match.group(1) if url_host_match else "github.com"
+            assert url_host_match, f"parse_github_url accepted URL without host: {raw}"
+            host = url_host_match.group(1)
             target = f"{host}/{parsed_url.owner}/{parsed_url.repo}"
             gh_cli = detect_gh_cli(f"https://{host}/")
             title = fetch_issue_title(parsed_url.number, gh_cli, repo=target)
