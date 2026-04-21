@@ -728,12 +728,12 @@ def resolve_target_repo(
     # Explicit repo override always wins
     if explicit_repo:
         parts = explicit_repo.strip("/").split("/")
-        if len(parts) == 2:
+        if all(parts) and len(parts) == 2:
             # No host segment — fall back to GH_HOST if the caller set it,
             # so an explicit repo combined with an explicit host still
             # reaches the right API.
             return gh_host, parts[0], parts[1]
-        if len(parts) == 3:
+        if all(parts) and len(parts) == 3:
             return parts[0], parts[1], parts[2]
         raise click.ClickException(
             f"Invalid --repo value {explicit_repo!r}. "

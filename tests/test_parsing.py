@@ -483,6 +483,19 @@ class TestResolveTargetRepo:
         monkeypatch.delenv("GH_HOST", raising=False)
         assert work.resolve_target_repo() is None
 
+    def test_malformed_explicit_repo_errors(self, tmp_path, monkeypatch):
+        # Empty segments (``owner//name``) or too many / too few slashes
+        # should raise a clear error rather than producing a malformed
+        # downstream target.
+        repo = _init_git_repo_with_remotes(
+            tmp_path, {"origin": "https://github.com/owner/repo.git"}
+        )
+        monkeypatch.chdir(repo)
+        for bad in ("owner//name", "just-one-segment", "a/b/c/d"):
+            with pytest.raises(click.ClickException) as excinfo:
+                work.resolve_target_repo(explicit_repo=bad)
+            assert "Invalid --repo" in excinfo.value.message
+
 
 class TestParseIssueArgRepoScoped:
     """Tests for parse_issue_arg with owner/repo:N syntax."""
