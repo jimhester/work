@@ -121,6 +121,20 @@ class TestParseIssueArg:
         assert issue == "https://github.com/owner/repo/issues/1"
         assert repo is None
 
+    def test_feature_description_with_colon_not_split(self):
+        # Descriptions like "fix: some text" have colons but shouldn't be
+        # parsed as repo-scoped — the suffix isn't numeric.
+        issue, repo = work.parse_issue_arg("fix: the auth bug")
+        assert issue == "fix: the auth bug"
+        assert repo is None
+
+    def test_repo_prefix_requires_numeric_suffix(self):
+        # ``repo:something-non-numeric`` is also treated as a description,
+        # not a repo-scoped issue spec.
+        issue, repo = work.parse_issue_arg("repo:abc")
+        assert issue == "repo:abc"
+        assert repo is None
+
 
 class TestSlugify:
     """Tests for slugify function."""
@@ -444,6 +458,21 @@ class TestResolveTargetRepo:
         monkeypatch.chdir(repo)
         result = work.resolve_target_repo(
             explicit_repo="github.netflix.net/corp/proj"
+        )
+        assert result == ("github.netflix.net", "corp", "proj")
+
+    def test_explicit_repo_without_host_uses_gh_host(self, tmp_path, monkeypatch):
+        # When --repo has only owner/name and GH_HOST is set, the host
+        # hint from env should be preserved so downstream gh calls go to
+        # the intended host.
+        repo = _init_git_repo_with_remotes(
+            tmp_path,
+            {"origin": "https://github.com/owner/repo.git"},
+        )
+        monkeypatch.chdir(repo)
+        result = work.resolve_target_repo(
+            gh_host="github.netflix.net",
+            explicit_repo="corp/proj",
         )
         assert result == ("github.netflix.net", "corp", "proj")
 

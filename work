@@ -628,10 +628,15 @@ def parse_issue_arg(input_str: str) -> tuple[str, Optional[str]]:
     Parse issue argument with optional repo prefix.
     Returns (issue, repo) tuple where repo may be None.
     Supports: 42, repo:42, owner/repo:42, host/owner/repo:42, AIE-123
+
+    Only treats ``prefix:suffix`` as repo-scoped when the suffix is a
+    numeric issue number. This avoids misinterpreting feature
+    descriptions like ``"fix: the auth bug"`` as a repo prefix.
     """
     if ":" in input_str and not input_str.startswith("http"):
         repo, issue = input_str.split(":", 1)
-        return issue, repo
+        if issue.isdigit():
+            return issue, repo
     return input_str, None
 
 
@@ -724,7 +729,10 @@ def resolve_target_repo(
     if explicit_repo:
         parts = explicit_repo.strip("/").split("/")
         if len(parts) == 2:
-            return None, parts[0], parts[1]
+            # No host segment — fall back to GH_HOST if the caller set it,
+            # so an explicit repo combined with an explicit host still
+            # reaches the right API.
+            return gh_host, parts[0], parts[1]
         if len(parts) == 3:
             return parts[0], parts[1], parts[2]
         raise click.ClickException(
