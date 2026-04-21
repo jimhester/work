@@ -229,6 +229,15 @@ class TestParseRemoteUrl:
             "https://github.com/my-org/my-cool-repo.git"
         ) == ("github.com", "my-org", "my-cool-repo")
 
+    def test_repo_name_with_dots(self):
+        # GitHub allows dots in repo names
+        assert work.parse_remote_url(
+            "https://github.com/owner/foo.bar.git"
+        ) == ("github.com", "owner", "foo.bar")
+        assert work.parse_remote_url(
+            "git@github.com:owner/foo.bar.baz.git"
+        ) == ("github.com", "owner", "foo.bar.baz")
+
     def test_non_github_host_returns_none(self):
         assert work.parse_remote_url("https://gitlab.com/owner/repo.git") is None
         assert work.parse_remote_url("https://bitbucket.org/owner/repo.git") is None
@@ -585,3 +594,31 @@ class TestValidateIssuesBeforeSpawn:
         # fetch_issue_title should be called with host-prefixed repo
         call_kwargs = mock_fetch.call_args
         assert call_kwargs.kwargs.get("repo") == "github.netflix.net/corp/proj"
+
+    def test_repo_flag_with_non_numeric_errors(self, tmp_path, monkeypatch):
+        # `work --repo owner/name "some text"` is a user error — the repo
+        # flag only makes sense with a numeric issue. The validator must
+        # surface this BEFORE spawning so it fails in the same place as
+        # the child `work --here` would.
+        repo = _init_git_repo_with_remotes(
+            tmp_path, {"origin": "https://github.com/owner/repo.git"}
+        )
+        monkeypatch.chdir(repo)
+        with pytest.raises(click.ClickException) as excinfo:
+            work.validate_issues_before_spawn(
+                ("not-a-number",), repo_override="owner/name"
+            )
+        assert "numeric issue number" in excinfo.value.message
+
+    def test_plain_description_skipped(self, tmp_path, monkeypatch, mocker):
+        # Without --repo/prefix, non-numeric input is a feature
+        # description and should be passed through without validation.
+        repo = _init_git_repo_with_remotes(
+            tmp_path, {"origin": "https://github.com/owner/repo.git"}
+        )
+        monkeypatch.chdir(repo)
+        mock_fetch = mocker.patch.object(
+            work, "fetch_issue_title", return_value="title"
+        )
+        work.validate_issues_before_spawn(("add dark mode",))
+        mock_fetch.assert_not_called()

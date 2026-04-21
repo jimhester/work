@@ -646,13 +646,15 @@ def parse_remote_url(url: str) -> Optional[tuple[str, str, str]]:
     url = url.strip()
 
     # HTTPS: https://host/owner/repo(.git)?
+    # Repo name may contain dots (e.g. `foo.bar`); only `.git` suffix or
+    # a trailing slash terminates the match.
     https_match = re.match(
-        r'https?://([^/]+)/([^/]+)/([^/.\s]+?)(?:\.git)?/?$',
+        r'https?://([^/]+)/([^/]+)/([^/\s]+?)(?:\.git)?/?$',
         url,
     )
     # SSH: git@host:owner/repo(.git)?
     ssh_match = re.match(
-        r'(?:ssh://)?git@([^:/]+)[:/]([^/]+)/([^/.\s]+?)(?:\.git)?/?$',
+        r'(?:ssh://)?git@([^:/]+)[:/]([^/]+)/([^/\s]+?)(?:\.git)?/?$',
         url,
     )
     match = https_match or ssh_match
@@ -1071,7 +1073,10 @@ def _build_work_invocation(
 ) -> str:
     """Build the ``work --here`` shell invocation, forwarding flags."""
     repo_flag = f" --repo {shlex.quote(repo_override)}" if repo_override else ""
-    return f"'{script_path}'{repo_flag} --here {shlex.quote(issue)}"
+    return (
+        f"{shlex.quote(str(script_path))}{repo_flag} "
+        f"--here {shlex.quote(issue)}"
+    )
 
 
 def spawn_iterm2(
@@ -1186,11 +1191,19 @@ def validate_issues_before_spawn(
 
         # Bare number or owner/name:N / host/owner/name:N
         issue_token, inline_repo = parse_issue_arg(raw)
-        if not issue_token.isdigit():
-            # Not a number and not URL/JIRA → description; skip
-            continue
-
         effective_repo = repo_override or inline_repo
+
+        if not issue_token.isdigit():
+            # A repo override with a non-numeric token is a user error —
+            # mirror the check in ``run_here`` so the spawn path fails
+            # here rather than silently later inside the new terminal tab.
+            if effective_repo:
+                raise click.ClickException(
+                    f"--repo or 'repo:' prefix requires a numeric issue "
+                    f"number, got: {issue_token!r}"
+                )
+            # Otherwise treat as a feature description; nothing to validate.
+            continue
         try:
             resolved = resolve_target_repo(
                 gh_host=gh_host, explicit_repo=effective_repo
