@@ -20,6 +20,7 @@ fail() { echo -e "${RED}FAIL${NC}: $*"; FAILURES=$((FAILURES + 1)); }
 
 FAILURES=0
 
+# shellcheck disable=SC2329  # invoked via `trap cleanup EXIT`
 cleanup() {
     rm -f "$TEST_DB"
 }
@@ -79,7 +80,7 @@ fi
 
 # Test 4: No WORK_WORKER_ID exits cleanly
 unset WORK_WORKER_ID
-OUTPUT=$(echo '{"reason":"other"}' | "$HOOK" 2>&1) || true
+echo '{"reason":"other"}' | "$HOOK" >/dev/null 2>&1 || true
 pass "No WORK_WORKER_ID exits without error"
 
 echo ""
