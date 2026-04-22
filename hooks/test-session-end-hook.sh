@@ -20,11 +20,7 @@ fail() { echo -e "${RED}FAIL${NC}: $*"; FAILURES=$((FAILURES + 1)); }
 
 FAILURES=0
 
-# shellcheck disable=SC2329  # invoked via `trap cleanup EXIT`
-cleanup() {
-    rm -f "$TEST_DB"
-}
-trap cleanup EXIT
+trap 'rm -f "$TEST_DB"' EXIT
 
 # Create test database
 sqlite3 "$TEST_DB" "
