@@ -2257,9 +2257,9 @@ If issues found: Write "ISSUES_FOUND" on its own line.
         # --print is non-interactive (one-shot API call), so nested session concerns don't apply.
         env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
         result = subprocess.run(
-            ["claude", "--print", "-p", prompt],
+            ["claude", "--print"],
             capture_output=True, text=True,
-            stdin=subprocess.DEVNULL,  # Prevent hanging in background tasks
+            input=prompt,  # Pipe via stdin so large diffs don't blow ARG_MAX
             env=env,
         )
         output = result.stdout
