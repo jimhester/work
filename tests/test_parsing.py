@@ -697,3 +697,53 @@ class TestValidateIssuesBeforeSpawn:
         )
         work.validate_issues_before_spawn(("add dark mode",))
         mock_fetch.assert_not_called()
+
+
+class TestSpawnGuard:
+    """Tests for the unknown-flag guard in the default spawn path.
+
+    Guards against another CLI named 'work' (e.g. Netflix Dev Workspaces'
+    /usr/local/bin/work) being shadowed in PATH. Without the guard, its
+    args (e.g. 'create alfred --template ...') get absorbed into the
+    variadic 'issues' tuple and silently spawned as workers.
+    """
+
+    def test_refuses_unknown_flag_args(self, monkeypatch):
+        from click.testing import CliRunner
+
+        # Safety net: if the guard were missing, the buggy default path
+        # would try to validate/spawn real workers. Stub both so the RED
+        # run (and any future regression) has no side effects.
+        spawned = []
+        monkeypatch.setattr(
+            work, "spawn_in_new_tab", lambda *a, **k: spawned.append(a[0])
+        )
+        monkeypatch.setattr(
+            work, "validate_issues_before_spawn", lambda *a, **k: None
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(
+            work.cli, ["create", "alfred", "--template", "workspace-v1"]
+        )
+        assert result.exit_code == 2
+        assert "refusing to spawn" in result.output
+        assert spawned == []  # guard fired before any validation/spawn
+
+    def test_spawn_path_still_works_with_normal_args(self, monkeypatch):
+        from click.testing import CliRunner
+
+        # Confirm the guard does NOT fire on legit issue numbers /
+        # descriptions — normal args still flow through to spawn.
+        spawned = []
+        monkeypatch.setattr(
+            work, "spawn_in_new_tab", lambda *a, **k: spawned.append(a[0])
+        )
+        monkeypatch.setattr(
+            work, "validate_issues_before_spawn", lambda *a, **k: None
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(work.cli, ["42", "feature description"])
+        assert result.exit_code == 0
+        assert spawned == ["42", "feature description"]

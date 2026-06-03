@@ -1726,6 +1726,23 @@ def cli(ctx, issues, here, show_status, show_events, show_logs, do_stop, do_send
         click.echo(ctx.get_help())
         return
 
+    # Guard against CLI shadowing: a positional arg starting with '--' means
+    # click couldn't parse it as a known option and absorbed it into `issues`.
+    # That almost always means another tool named 'work' (e.g. Netflix Dev
+    # Workspaces' /usr/local/bin/work) was intended and got shadowed in PATH.
+    unknown_flags = [i for i in issues if i.startswith("--")]
+    if unknown_flags:
+        click.echo(
+            f"work: refusing to spawn — unknown options in args: {', '.join(unknown_flags)}",
+            err=True,
+        )
+        click.echo(
+            "  Another tool named 'work' was likely intended. "
+            "Run `command -v work` and check your PATH.",
+            err=True,
+        )
+        sys.exit(2)
+
     if here:
         # Run in current terminal
         description = issues[1] if len(issues) > 1 else None
