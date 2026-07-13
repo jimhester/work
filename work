@@ -20,6 +20,7 @@ from __future__ import annotations
 import os
 import re
 import json
+import shlex
 import signal
 import sqlite3
 import subprocess
@@ -59,21 +60,6 @@ config = Config()
 
 
 @dataclass
-class ContextConfig:
-    """Context management configuration."""
-    warn_threshold: int = 60
-    recommend_threshold: int = 75
-    urgent_threshold: int = 85
-    trim_threshold_chars: int = 500
-    trim_target_tools: list = None
-    check_interval_seconds: int = 60
-
-    def __post_init__(self):
-        if self.trim_target_tools is None:
-            self.trim_target_tools = ["Read", "Bash", "Grep", "Glob"]
-
-
-@dataclass
 class WorkConfig:
     """Project-specific work configuration from .work.toml."""
     worker_guidelines: str = ""
@@ -81,7 +67,6 @@ class WorkConfig:
     review_strictness: str = "normal"  # "strict", "normal", "lenient"
     require_pre_merge_review: bool = True
     review_exclude_patterns: list = None  # Files to exclude from review diff
-    context: ContextConfig = None  # Context management settings
 
     def __post_init__(self):
         if self.review_exclude_patterns is None:
@@ -97,8 +82,6 @@ class WorkConfig:
                 "poetry.lock",
                 "go.sum",
             ]
-        if self.context is None:
-            self.context = ContextConfig()
 
 
 def load_work_config() -> WorkConfig:
@@ -124,16 +107,6 @@ def load_work_config() -> WorkConfig:
                 # Override exclude patterns if specified in config
                 if "review_exclude_patterns" in data:
                     wc.review_exclude_patterns = data["review_exclude_patterns"]
-                # Load context config
-                context_data = data.get("context", {})
-                wc.context = ContextConfig(
-                    warn_threshold=context_data.get("warn_threshold", 60),
-                    recommend_threshold=context_data.get("recommend_threshold", 75),
-                    urgent_threshold=context_data.get("urgent_threshold", 85),
-                    trim_threshold_chars=context_data.get("trim_threshold_chars", 500),
-                    trim_target_tools=context_data.get("trim_target_tools"),
-                    check_interval_seconds=context_data.get("check_interval_seconds", 60),
-                )
                 return wc
             except Exception as e:
                 click.echo(f"Warning: Failed to parse {config_path}: {e}", err=True)
@@ -155,175 +128,6 @@ VALID_STAGES = [
 ]
 
 
-# =============================================================================
-# Context Management Utilities
-# =============================================================================
-
-def get_context_percentage_from_file(session_file: Path) -> Optional[int]:
-    """
-    Parse context percentage from a Claude session JSONL file.
-    Returns None if file doesn't exist or has no context metadata.
-    """
-    if not session_file.exists():
-        return None
-
-    try:
-        # Read file in reverse to find most recent metadata
-        with open(session_file, "r") as f:
-            lines = f.readlines()
-
-        for line in reversed(lines):
-            try:
-                data = json.loads(line.strip())
-                if "contextTokens" in data and "maxContextTokens" in data:
-                    context_tokens = data["contextTokens"]
-                    max_tokens = data["maxContextTokens"]
-                    if max_tokens > 0:
-                        return int((context_tokens / max_tokens) * 100)
-            except json.JSONDecodeError:
-                continue
-
-        return None
-    except Exception:
-        return None
-
-
-def truncate_content(
-    content: str,
-    threshold: int,
-    tool_name: str,
-    line_num: int,
-    parent_file: str,
-) -> str:
-    """
-    Truncate content if it exceeds threshold.
-    Keeps first N chars and adds reference to parent file.
-    """
-    if len(content) <= threshold:
-        return content
-
-    truncated = content[:threshold]
-    notice = (
-        f"\n\n[...truncated - original was {len(content):,} chars, "
-        f"showing first {threshold}. See line {line_num} of {parent_file} for full content]"
-    )
-
-    result = truncated + notice
-    # Only return truncated if it actually saves space
-    if len(result) >= len(content):
-        return content
-    return result
-
-
-def build_tool_name_mapping(session_file: Path) -> dict:
-    """
-    Build mapping of tool_use_id -> tool_name from session file.
-    First pass to enable identifying tool results by their tool name.
-    """
-    tool_map = {}
-
-    with open(session_file, "r") as f:
-        for line in f:
-            try:
-                data = json.loads(line.strip())
-                if data.get("type") == "assistant":
-                    content = data.get("message", {}).get("content", [])
-                    if isinstance(content, list):
-                        for item in content:
-                            if isinstance(item, dict) and item.get("type") == "tool_use":
-                                tool_id = item.get("id")
-                                tool_name = item.get("name")
-                                if tool_id and tool_name:
-                                    tool_map[tool_id] = tool_name
-            except json.JSONDecodeError:
-                continue
-
-    return tool_map
-
-
-def trim_session_file(
-    input_file: Path,
-    output_file: Path,
-    threshold: int = 500,
-    target_tools: set = None,
-) -> dict:
-    """
-    Trim large tool outputs from a Claude session file.
-    Returns stats about what was trimmed.
-    """
-    if target_tools is None:
-        target_tools = {"Read", "Bash", "Grep", "Glob"}
-
-    tool_map = build_tool_name_mapping(input_file)
-    parent_file = str(input_file.absolute())
-
-    trimmed_count = 0
-    original_size = 0
-    new_size = 0
-
-    with open(input_file, "r") as infile, open(output_file, "w") as outfile:
-        # Reserve first line for metadata (will be written at the end)
-        lines_to_write = []
-
-        for line_num, line in enumerate(infile, start=1):
-            original_size += len(line)
-
-            try:
-                data = json.loads(line.strip())
-
-                # Process user messages containing tool results
-                if data.get("type") == "user":
-                    content = data.get("message", {}).get("content", [])
-                    if isinstance(content, list):
-                        for item in content:
-                            if isinstance(item, dict) and item.get("type") == "tool_result":
-                                tool_use_id = item.get("tool_use_id")
-                                tool_name = tool_map.get(tool_use_id, "Unknown")
-
-                                if tool_name in target_tools:
-                                    result_content = item.get("content", "")
-                                    if isinstance(result_content, str) and len(result_content) > threshold:
-                                        item["content"] = truncate_content(
-                                            result_content,
-                                            threshold,
-                                            tool_name,
-                                            line_num,
-                                            parent_file,
-                                        )
-                                        trimmed_count += 1
-
-                new_line = json.dumps(data) + "\n"
-                lines_to_write.append(new_line)
-                new_size += len(new_line)
-
-            except json.JSONDecodeError:
-                lines_to_write.append(line)
-                new_size += len(line)
-
-        # Write trim_metadata as first line
-        trim_metadata = {
-            "trim_metadata": {
-                "parent_file": parent_file,
-                "trimmed_at": datetime.now(timezone.utc).isoformat(),
-                "threshold": threshold,
-                "trimmed_count": trimmed_count,
-            }
-        }
-        metadata_line = json.dumps(trim_metadata) + "\n"
-        outfile.write(metadata_line)
-        new_size += len(metadata_line)
-
-        # Write all the processed lines
-        for line in lines_to_write:
-            outfile.write(line)
-
-    return {
-        "trimmed_count": trimmed_count,
-        "original_chars": original_size,
-        "trimmed_chars": new_size,
-    }
-
-
 def find_current_session_file() -> Optional[Path]:
     """
     Find the most recent Claude session file in ~/.claude/projects/.
@@ -340,59 +144,6 @@ def find_current_session_file() -> Optional[Path]:
 
     # Return the most recently modified file
     return max(session_files, key=lambda p: p.stat().st_mtime)
-
-
-def update_session_id_in_file(file_path: Path, new_session_id: str) -> None:
-    """
-    Update sessionId in all lines of a session file.
-    Modifies the file in place.
-    """
-    lines = []
-    with open(file_path, "r") as f:
-        for line in f:
-            try:
-                data = json.loads(line.strip())
-                if "sessionId" in data:
-                    data["sessionId"] = new_session_id
-                lines.append(json.dumps(data) + "\n")
-            except json.JSONDecodeError:
-                lines.append(line)
-
-    with open(file_path, "w") as f:
-        f.writelines(lines)
-
-
-def build_continuation_prompt(
-    session_number: int,
-    issue_ref: str,
-    context_pct: int,
-    summary: str,
-    parent_session_path: str,
-    worker_id: Optional[str],
-) -> str:
-    """
-    Build a continuation prompt for session rollover.
-    Returns markdown-formatted handoff instructions.
-    """
-    lineage_lines = [f"Parent session: {parent_session_path}"]
-    if worker_id:
-        lineage_lines.append(f"Worker ID: {worker_id}")
-
-    return f"""## Session Continuation
-
-This is session #{session_number} for {issue_ref}.
-Previous session rolled over at {context_pct}% context to preserve quality.
-
-### Handoff Summary
-{summary}
-
-### Retrieving Details
-The full previous session is indexed in episodic-memory.
-Use the search tool to retrieve specific details, decisions, or code snippets as needed.
-
-### Lineage
-{chr(10).join(lineage_lines)}
-"""
 
 
 # =============================================================================
@@ -450,25 +201,12 @@ CREATE TABLE IF NOT EXISTS messages (
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE TABLE IF NOT EXISTS sessions (
-    id INTEGER PRIMARY KEY,
-    worker_id INTEGER REFERENCES workers(id),
-    session_number INTEGER,
-    session_id TEXT,
-    started_at TEXT DEFAULT CURRENT_TIMESTAMP,
-    ended_at TEXT,
-    end_reason TEXT,
-    context_at_end INTEGER,
-    summary TEXT
-);
-
 CREATE INDEX IF NOT EXISTS idx_workers_status ON workers(status);
 CREATE INDEX IF NOT EXISTS idx_workers_repo ON workers(repo_path);
 CREATE INDEX IF NOT EXISTS idx_events_worker ON events(worker_id);
 CREATE INDEX IF NOT EXISTS idx_events_time ON events(created_at);
 CREATE INDEX IF NOT EXISTS idx_messages_worker ON messages(worker_id);
 CREATE INDEX IF NOT EXISTS idx_messages_unread ON messages(worker_id, read_at);
-CREATE INDEX IF NOT EXISTS idx_sessions_worker ON sessions(worker_id);
 """
 
 
@@ -839,55 +577,6 @@ def db_get_message_count(worker_id: int) -> int:
         return cursor.fetchone()["count"]
 
 
-def db_create_session(
-    worker_id: int,
-    session_number: int,
-    claude_session_id: Optional[str] = None,
-) -> int:
-    """Create a new session record for a worker."""
-    with get_db() as conn:
-        cursor = conn.execute(
-            """
-            INSERT INTO sessions (worker_id, session_number, session_id)
-            VALUES (?, ?, ?)
-            """,
-            (worker_id, session_number, claude_session_id),
-        )
-        return cursor.lastrowid
-
-
-def db_end_session(
-    session_id: int,
-    end_reason: str,
-    context_at_end: Optional[int] = None,
-    summary: Optional[str] = None,
-) -> None:
-    """Mark a session as ended with metadata."""
-    with get_db() as conn:
-        conn.execute(
-            """
-            UPDATE sessions
-            SET ended_at = CURRENT_TIMESTAMP,
-                end_reason = ?,
-                context_at_end = ?,
-                summary = ?
-            WHERE id = ?
-            """,
-            (end_reason, context_at_end, summary, session_id),
-        )
-
-
-def db_get_current_session_number(worker_id: int) -> int:
-    """Get the highest session number for a worker, or 0 if none."""
-    with get_db() as conn:
-        cursor = conn.execute(
-            "SELECT MAX(session_number) FROM sessions WHERE worker_id = ?",
-            (worker_id,),
-        )
-        result = cursor.fetchone()[0]
-        return result if result is not None else 0
-
-
 # =============================================================================
 # Issue Parsing
 # =============================================================================
@@ -938,12 +627,164 @@ def parse_issue_arg(input_str: str) -> tuple[str, Optional[str]]:
     """
     Parse issue argument with optional repo prefix.
     Returns (issue, repo) tuple where repo may be None.
-    Supports: 42, repo:42, AIE-123
+    Supports: 42, repo:42, owner/repo:42, host/owner/repo:42, AIE-123
+
+    Only treats ``prefix:suffix`` as repo-scoped when the suffix is a
+    numeric issue number. This avoids misinterpreting feature
+    descriptions like ``"fix: the auth bug"`` as a repo prefix.
     """
     if ":" in input_str and not input_str.startswith("http"):
         repo, issue = input_str.split(":", 1)
-        return issue, repo
+        if issue.isdigit():
+            return issue, repo
     return input_str, None
+
+
+def parse_remote_url(url: str) -> Optional[tuple[str, str, str]]:
+    """Parse a git remote URL into (host, owner, repo).
+
+    Supports HTTPS and SSH URL forms for github.com and
+    github.netflix.net. Returns None for other hosts or invalid input.
+    """
+    if not url:
+        return None
+    url = url.strip()
+
+    # HTTPS: https://host/owner/repo(.git)?
+    # Repo name may contain dots (e.g. `foo.bar`); only `.git` suffix or
+    # a trailing slash terminates the match.
+    https_match = re.match(
+        r'https?://([^/]+)/([^/]+)/([^/\s]+?)(?:\.git)?/?$',
+        url,
+    )
+    # SSH: git@host:owner/repo(.git)?
+    ssh_match = re.match(
+        r'(?:ssh://)?git@([^:/]+)[:/]([^/]+)/([^/\s]+?)(?:\.git)?/?$',
+        url,
+    )
+    match = https_match or ssh_match
+    if not match:
+        return None
+
+    host = match.group(1)
+    # Allowlist of GitHub hosts — anything else is out of scope for
+    # auto-detection. Users on custom GHE hosts can still pass an
+    # explicit ``--repo host/owner/name`` or a full issue URL.
+    allowed = ("github.com", "github.netflix.net")
+    if not any(host == h or host.endswith("." + h) for h in allowed):
+        return None
+    return host, match.group(2), match.group(3)
+
+
+def get_git_remotes() -> list[tuple[str, str, str, str]]:
+    """Return git remotes as list of (name, host, owner, repo).
+
+    Reads raw URLs from git config so ``url.<base>.insteadOf`` rewrites
+    do not mask the actual host the user configured. Filters out
+    non-GitHub remotes. Returns an empty list if not in a git repo or
+    git errors out.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "config", "--get-regexp", r"^remote\..*\.url$"],
+            capture_output=True, text=True, check=True,
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return []
+
+    remotes: list[tuple[str, str, str, str]] = []
+    for line in result.stdout.strip().split('\n'):
+        if not line:
+            continue
+        key, _, url = line.partition(' ')
+        match = re.match(r'^remote\.(.+)\.url$', key)
+        if not match:
+            continue
+        name = match.group(1)
+        parsed = parse_remote_url(url)
+        if parsed:
+            host, owner, repo = parsed
+            remotes.append((name, host, owner, repo))
+    return remotes
+
+
+def resolve_target_repo(
+    gh_host: Optional[str] = None,
+    explicit_repo: Optional[str] = None,
+) -> Optional[tuple[Optional[str], str, str]]:
+    """Resolve the repo a bare issue number should target.
+
+    Returns (host, owner, repo) where host may be None when explicit_repo
+    has no host prefix. Returns None when not in a git repo and no
+    explicit_repo is given.
+
+    Priority:
+    1. explicit_repo (from --repo or repo:N syntax) wins over detection.
+    2. gh_host (from env) picks the matching remote when set.
+    3. Otherwise, use git remotes. If remotes span multiple hosts and no
+       disambiguator is provided, raise ClickException with guidance.
+
+    Args:
+        gh_host: Value of GH_HOST env var, or None.
+        explicit_repo: "owner/name" or "host/owner/name" from user.
+    """
+    # Explicit repo override always wins
+    if explicit_repo:
+        parts = explicit_repo.strip("/").split("/")
+        if all(parts) and len(parts) == 2:
+            # No host segment — fall back to GH_HOST if the caller set it,
+            # so an explicit repo combined with an explicit host still
+            # reaches the right API.
+            return gh_host, parts[0], parts[1]
+        if all(parts) and len(parts) == 3:
+            return parts[0], parts[1], parts[2]
+        raise click.ClickException(
+            f"Invalid --repo value {explicit_repo!r}. "
+            f"Expected owner/name or host/owner/name."
+        )
+
+    remotes = get_git_remotes()
+    if not remotes:
+        return None
+
+    # GH_HOST pins the host when set
+    if gh_host:
+        matching = [r for r in remotes if r[1] == gh_host]
+        if not matching:
+            hosts = sorted({r[1] for r in remotes})
+            raise click.ClickException(
+                f"GH_HOST={gh_host} but no git remote matches that host.\n"
+                f"Remotes found on: {', '.join(hosts)}\n"
+                f"Either unset GH_HOST, add a matching remote, or pass "
+                f"--repo owner/name."
+            )
+        # Prefer origin among matches, else first
+        origin = next((r for r in matching if r[0] == 'origin'), None)
+        _, host, owner, repo = origin or matching[0]
+        return host, owner, repo
+
+    # No GH_HOST: check for cross-host ambiguity
+    hosts = {r[1] for r in remotes}
+    if len(hosts) > 1:
+        remote_descs = "\n".join(
+            f"  {name}: https://{host}/{owner}/{repo}"
+            for name, host, owner, repo in remotes
+        )
+        raise click.ClickException(
+            "Multiple git remotes on different hosts detected; bare "
+            "issue numbers are ambiguous:\n"
+            f"{remote_descs}\n\n"
+            "Disambiguate with one of:\n"
+            "  - Set GH_HOST=<host> to pick the remote on that host\n"
+            "  - Pass --repo owner/name (or host/owner/name) to work\n"
+            "  - Prefix the number with the repo (e.g. 'owner/name:42')\n"
+            "  - Pass a full issue URL instead"
+        )
+
+    # Single host: prefer origin, else first remote
+    origin = next((r for r in remotes if r[0] == 'origin'), None)
+    _, host, owner, repo = origin or remotes[0]
+    return host, owner, repo
 
 
 def get_repo_root() -> Optional[Path]:
@@ -1246,16 +1087,60 @@ def detect_spawn_method() -> Optional[str]:
     return None
 
 
-def spawn_iterm2(issue: str, script_path: Path, cwd: Path) -> None:
+def _build_spawn_env_prefix() -> str:
+    """Build an ``env KEY=VAL`` prefix that forwards work-relevant env vars
+    (currently just GH_HOST) into the spawned terminal tab so child gh
+    calls honor the same host selection as the parent.
+    """
+    parts = []
+    gh_host = os.environ.get("GH_HOST")
+    if gh_host:
+        parts.append(f"GH_HOST={shlex.quote(gh_host)}")
+    return " ".join(parts)
+
+
+def _build_work_invocation(
+    issue: str,
+    script_path: Path,
+    repo_override: Optional[str] = None,
+) -> str:
+    """Build the ``work --here`` shell invocation, forwarding flags."""
+    repo_flag = f" --repo {shlex.quote(repo_override)}" if repo_override else ""
+    return (
+        f"{shlex.quote(str(script_path))}{repo_flag} "
+        f"--here {shlex.quote(issue)}"
+    )
+
+
+def _escape_for_applescript(s: str) -> str:
+    """Escape a string for embedding in an AppleScript double-quoted literal.
+
+    ``shlex.quote`` output can contain ``"`` (e.g. ``'O'"'"'Brian'``),
+    which would prematurely close the AppleScript string. Backslashes
+    also need escaping because AppleScript treats ``\\`` as an escape.
+    """
+    return s.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def spawn_iterm2(
+    issue: str,
+    script_path: Path,
+    cwd: Path,
+    repo_override: Optional[str] = None,
+) -> None:
     """Spawn a new iTerm2 tab with the work command."""
-    cmd = f"cd '{cwd}' && '{script_path}' --here '{issue}'"
+    env_prefix = _build_spawn_env_prefix()
+    env_str = f"{env_prefix} " if env_prefix else ""
+    invocation = _build_work_invocation(issue, script_path, repo_override)
+    cmd = f"cd {shlex.quote(str(cwd))} && {env_str}{invocation}"
+    cmd_for_applescript = _escape_for_applescript(cmd)
 
     applescript = f'''
 tell application "iTerm2"
     tell current window
         create tab with default profile
         tell current session
-            write text "{cmd}"
+            write text "{cmd_for_applescript}"
         end tell
     end tell
 end tell
@@ -1263,12 +1148,20 @@ end tell
     subprocess.run(["osascript", "-e", applescript], check=True)
 
 
-def spawn_wsl(issue: str, script_path: Path, cwd: Path) -> None:
+def spawn_wsl(
+    issue: str,
+    script_path: Path,
+    cwd: Path,
+    repo_override: Optional[str] = None,
+) -> None:
     """Spawn a new Windows Terminal tab via WSL."""
     distro = os.environ.get("WSL_DISTRO_NAME", "Ubuntu")
     shell = os.path.basename(os.environ.get("SHELL", "/bin/bash"))
 
-    cmd = f"cd '{cwd}' && '{script_path}' --here '{issue}'"
+    env_prefix = _build_spawn_env_prefix()
+    env_str = f"{env_prefix} " if env_prefix else ""
+    invocation = _build_work_invocation(issue, script_path, repo_override)
+    cmd = f"cd {shlex.quote(str(cwd))} && {env_str}{invocation}"
 
     # Find wt.exe
     import glob
@@ -1284,7 +1177,7 @@ def spawn_wsl(issue: str, script_path: Path, cwd: Path) -> None:
     ], check=True)
 
 
-def spawn_in_new_tab(issue: str) -> None:
+def spawn_in_new_tab(issue: str, repo_override: Optional[str] = None) -> None:
     """Spawn work command in a new terminal tab."""
     method = detect_spawn_method()
     if not method:
@@ -1297,9 +1190,114 @@ def spawn_in_new_tab(issue: str) -> None:
     cwd = Path.cwd()
 
     if method == "iterm2":
-        spawn_iterm2(issue, script_path, cwd)
+        spawn_iterm2(issue, script_path, cwd, repo_override)
     elif method == "wsl":
-        spawn_wsl(issue, script_path, cwd)
+        spawn_wsl(issue, script_path, cwd, repo_override)
+
+
+def validate_issues_before_spawn(
+    issues: tuple, repo_override: Optional[str] = None
+) -> None:
+    """Resolve each GitHub issue against its target repo before spawning.
+
+    Bails with a clear error if any issue can't be resolved, so workers
+    aren't spawned against the wrong repo. JIRA keys and feature
+    descriptions are skipped (they don't need cross-remote resolution).
+
+    Raises:
+        click.ClickException: If any issue resolves to a non-existent
+            issue or the repo can't be determined.
+    """
+    gh_host = os.environ.get("GH_HOST")
+    failures: list[str] = []
+    resolved_repos: set[str] = set()
+    validated_count = 0
+
+    for raw in issues:
+        # Skip obvious non-GitHub inputs
+        if parse_jira_key(raw):
+            continue
+
+        parsed_url = parse_github_url(raw)
+        if parsed_url:
+            # ``parse_github_url`` already required a valid https?:// host,
+            # so this match is guaranteed to succeed.
+            url_host_match = re.match(r'https?://(?:www\.)?([^/]+)', raw)
+            assert url_host_match, f"parse_github_url accepted URL without host: {raw}"
+            host = url_host_match.group(1)
+            target = f"{host}/{parsed_url.owner}/{parsed_url.repo}"
+            gh_cli = detect_gh_cli(f"https://{host}/")
+            title = fetch_issue_title(parsed_url.number, gh_cli, repo=target)
+            if title is None:
+                failures.append(
+                    f"  {raw}: could not fetch issue {parsed_url.number} "
+                    f"from {target}"
+                )
+            else:
+                resolved_repos.add(target)
+                validated_count += 1
+            continue
+
+        # Bare number or owner/name:N / host/owner/name:N
+        issue_token, inline_repo = parse_issue_arg(raw)
+        effective_repo = repo_override or inline_repo
+
+        if not issue_token.isdigit():
+            # A repo override with a non-numeric token is a user error —
+            # mirror the check in ``run_here`` so the spawn path fails
+            # here rather than silently later inside the new terminal tab.
+            if effective_repo:
+                raise click.ClickException(
+                    f"--repo or 'repo:' prefix requires a numeric issue "
+                    f"number, got: {issue_token!r}"
+                )
+            # Otherwise treat as a feature description; nothing to validate.
+            continue
+        try:
+            resolved = resolve_target_repo(
+                gh_host=gh_host, explicit_repo=effective_repo
+            )
+        except click.ClickException as e:
+            # Ambiguous remotes or missing matching host: surface once
+            raise click.ClickException(
+                f"Cannot resolve issue {raw!r}:\n{e.message}"
+            )
+        if not resolved:
+            failures.append(
+                f"  {raw}: no git remote found and no --repo provided"
+            )
+            continue
+
+        host, owner, repo = resolved
+        target = f"{host}/{owner}/{repo}" if host else f"{owner}/{repo}"
+        gh_cli = detect_gh_cli(f"https://{host}/" if host else None)
+        title = fetch_issue_title(int(issue_token), gh_cli, repo=target)
+        if title is None:
+            failures.append(
+                f"  {raw}: issue #{issue_token} not found in {target}"
+            )
+        else:
+            resolved_repos.add(target)
+            validated_count += 1
+
+    if failures:
+        repo_list = (
+            "\n\nResolved against:\n  " + "\n  ".join(sorted(resolved_repos))
+            if resolved_repos else ""
+        )
+        raise click.ClickException(
+            "Could not validate one or more issues before spawning:\n"
+            + "\n".join(failures)
+            + repo_list
+            + "\n\nPass --repo owner/name or a full URL to pin the target "
+            "repo, or set GH_HOST to disambiguate."
+        )
+
+    if validated_count:
+        click.echo(
+            f"Validated {validated_count} issue(s) against: "
+            f"{', '.join(sorted(resolved_repos))}"
+        )
 
 
 def spawn_resume_iterm2(session_id: str, worktree_path: Path, worker_id: int) -> None:
@@ -1602,14 +1600,13 @@ def extract_plan_name(plan_path: str) -> str:
 @click.option('--cleanup', 'do_cleanup', is_flag=True, help='Find and kill orphaned claude processes')
 @click.option('--force', 'force', is_flag=True, help='Skip confirmation prompts (for --cleanup)')
 @click.option('--plan', 'plan_file', type=click.Path(exists=True), help='Execute a plan file in a new worker')
-@click.option('--trim', 'do_trim', is_flag=True, help='Trim current session context')
-@click.option('--rollover', 'do_rollover', is_flag=True, help='Roll over to new session with handoff')
-@click.option('--summary-file', 'summary_file', type=click.Path(exists=True), help='Path to summary text file (for --rollover)')
+@click.option('--repo', 'repo_override',
+              help='Target repo for bare issue numbers: owner/name or host/owner/name')
 @click.pass_context
 def cli(ctx, issues, here, show_status, show_events, show_logs, do_stop, do_send,
         show_messages, peek, quiet, set_stage, mark_done, set_pr, log_event, transition, msg_type,
         do_init, no_ai, do_review, pre_merge, dry_run, show_reviews, do_resume, do_cleanup, force,
-        plan_file, do_trim, do_rollover, summary_file):
+        plan_file, repo_override):
     """
     Start Claude Code session(s) for GitHub issue(s) or JIRA tickets.
 
@@ -1621,6 +1618,14 @@ def cli(ctx, issues, here, show_status, show_events, show_logs, do_stop, do_send
       work "add dark mode support"      # New feature branch
       work AIE-123                       # JIRA issue
       work --plan docs/plans/my-plan.md # Execute a plan file
+
+    \b
+    Disambiguating the target repo (when you have multiple remotes):
+      work --repo owner/name 4 5 6     # Pin all issues to owner/name
+      work --repo host/owner/name 42   # Include host when needed
+      work owner/name:42               # Inline prefix on a single issue
+      work host/owner/name:42          # With host prefix
+      GH_HOST=github.netflix.net work 42  # Pick the matching remote
 
     \b
     Config & Review:
@@ -1673,17 +1678,6 @@ def cli(ctx, issues, here, show_status, show_events, show_logs, do_stop, do_send
 
     if plan_file:
         cmd_plan(plan_file, here)
-        return
-
-    if do_trim:
-        cmd_trim()
-        return
-
-    if do_rollover:
-        if not summary_file:
-            raise click.ClickException("--rollover requires --summary-file")
-        worker_id = os.environ.get("WORK_WORKER_ID")
-        cmd_rollover(Path(summary_file), worker_id)
         return
 
     # Handle management commands
@@ -1757,13 +1751,17 @@ def cli(ctx, issues, here, show_status, show_events, show_logs, do_stop, do_send
     if here:
         # Run in current terminal
         description = issues[1] if len(issues) > 1 else None
-        run_here(issues[0], description)
+        run_here(issues[0], description, repo_override=repo_override)
     else:
+        # Validate issues upfront before spawning any tabs (fast fail on
+        # ambiguous-remote / missing-issue / wrong-repo mismatches).
+        validate_issues_before_spawn(issues, repo_override)
+
         # Spawn in new tabs
         for i, issue in enumerate(issues):
             if i > 0:
                 time.sleep(config.spawn_delay)
-            spawn_in_new_tab(issue)
+            spawn_in_new_tab(issue, repo_override=repo_override)
             click.echo(f"Spawned worker for: {issue}")
 
 
@@ -2284,9 +2282,9 @@ If issues found: Write "ISSUES_FOUND" on its own line.
         # --print is non-interactive (one-shot API call), so nested session concerns don't apply.
         env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
         result = subprocess.run(
-            ["claude", "--print", "-p", prompt],
+            ["claude", "--print"],
             capture_output=True, text=True,
-            stdin=subprocess.DEVNULL,  # Prevent hanging in background tasks
+            input=prompt,  # Pipe via stdin so large diffs don't blow ARG_MAX
             env=env,
         )
         output = result.stdout
@@ -2815,7 +2813,6 @@ def cmd_plan(plan_file: str, here: bool = False):
         jira_key=plan_name,  # Use plan name as the lookup key
         issue_source="plan",
     )
-    db_create_session(worker_id=worker_id, session_number=1)
 
     # Change to worktree and start Claude
     os.chdir(worktree_path)
@@ -2871,169 +2868,6 @@ def spawn_in_new_tab_with_prompt(worktree_path: str, worker_id: int, prompt: str
             "wsl.exe", "-d", distro, "--cd", str(worktree_path), "--",
             shell, "-lic", cmd
         ], check=True)
-
-
-def cmd_trim() -> None:
-    """Trim current session context and restart with fresh session ID.
-
-    Works from any Claude Code session - does not require a worker environment.
-    """
-    work_config = load_work_config()
-
-    # Note: Original session file is preserved, so episodic-memory can index it
-    # during its regular indexing cycle. No need to explicitly sync.
-
-    # 1. Find current session file
-    session_file = find_current_session_file()
-    if not session_file:
-        raise click.ClickException("Could not find current session file")
-
-    click.echo(f"Found session: {session_file.stem}")
-
-    # 2. Generate new session ID
-    new_session_id = str(uuid.uuid4())
-
-    # 3. Trim to temporary file
-    trimmed_file = session_file.with_suffix(".trimmed.jsonl")
-    stats = trim_session_file(
-        input_file=session_file,
-        output_file=trimmed_file,
-        threshold=work_config.context.trim_threshold_chars,
-        target_tools=set(work_config.context.trim_target_tools),
-    )
-
-    # 4. Update session IDs in trimmed file
-    update_session_id_in_file(trimmed_file, new_session_id)
-
-    # 5. Rename to final location (new session ID)
-    final_file = session_file.parent / f"{new_session_id}.jsonl"
-    trimmed_file.rename(final_file)
-
-    # 6. Print results
-    savings_pct = 0
-    if stats['original_chars'] > 0:
-        savings_pct = 100 * (1 - stats['trimmed_chars'] / stats['original_chars'])
-
-    click.echo(f"Trimmed {stats['trimmed_count']} tool outputs")
-    click.echo(f"Size: {stats['original_chars']:,} -> {stats['trimmed_chars']:,} chars ({savings_pct:.0f}% reduction)")
-    click.echo("")
-    click.echo("To resume with trimmed context:")
-    click.echo(f"  claude --resume {new_session_id}")
-    click.echo("")
-    click.echo("Original session preserved for episodic-memory indexing.")
-
-
-def cmd_rollover(summary_file: Path, worker_id: Optional[str] = None) -> None:
-    """Roll over to a new session with handoff summary.
-
-    Works from any Claude Code session. When run within a worker session
-    (WORK_WORKER_ID set), also updates worker database with session tracking.
-    """
-    import tempfile
-
-    # 1. Read summary from file
-    summary = summary_file.read_text().strip()
-    click.echo(f"Read summary from: {summary_file}")
-
-    # 2. Sync to episodic-memory (best effort)
-    click.echo("Syncing to episodic-memory...")
-    subprocess.run(
-        ["claude", "mcp", "run", "episodic-memory", "sync", "-y"],
-        check=False,
-        capture_output=True
-    )
-
-    # 3. Get context percentage from current session file
-    session_file = find_current_session_file()
-    context_pct = 0
-    parent_session_path = ""
-    if session_file:
-        context_pct = get_context_percentage_from_file(session_file) or 0
-        parent_session_path = str(session_file)
-        click.echo(f"Current context: {context_pct}%")
-
-    # 4. Handle worker-specific vs standalone mode
-    new_session_num = 1
-    issue_ref = "this task"
-
-    if worker_id:
-        # Worker mode: use database for session tracking
-        init_db()
-        worker_id_int = int(worker_id)
-        with get_db() as conn:
-            cursor = conn.execute(
-                "SELECT issue_number, jira_key, repo_name FROM workers WHERE id=?",
-                (worker_id_int,)
-            )
-            row = cursor.fetchone()
-            if row:
-                issue_number = row["issue_number"]
-                jira_key = row["jira_key"]
-
-                # Build issue reference
-                if jira_key:
-                    issue_ref = jira_key
-                elif issue_number:
-                    issue_ref = f"issue #{issue_number}"
-                else:
-                    issue_ref = f"worker {worker_id}"
-
-                # End current session in DB
-                current_session_num = db_get_current_session_number(worker_id_int)
-                if current_session_num > 0:
-                    cursor = conn.execute(
-                        "SELECT id FROM sessions WHERE worker_id=? AND session_number=? AND ended_at IS NULL",
-                        (worker_id_int, current_session_num)
-                    )
-                    session_row = cursor.fetchone()
-                    if session_row:
-                        db_end_session(
-                            session_id=session_row["id"],
-                            end_reason="rollover",
-                            context_at_end=context_pct,
-                            summary=summary
-                        )
-                        click.echo(f"Ended session #{current_session_num}")
-
-                # Create new session record
-                new_session_num = current_session_num + 1
-                db_create_session(
-                    worker_id=worker_id_int,
-                    session_number=new_session_num,
-                )
-                click.echo(f"Created session #{new_session_num}")
-            else:
-                click.echo(f"Warning: Worker {worker_id} not found in database, continuing without session tracking")
-    else:
-        click.echo("Running in standalone mode (no worker session)")
-
-    # 5. Build continuation prompt
-    prompt = build_continuation_prompt(
-        session_number=new_session_num,
-        issue_ref=issue_ref,
-        context_pct=context_pct,
-        summary=summary,
-        parent_session_path=parent_session_path,
-        worker_id=worker_id,
-    )
-
-    # 6. Write prompt to temp file
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False) as f:
-        f.write(prompt)
-        prompt_file = f.name
-    click.echo(f"Wrote continuation prompt to: {prompt_file}")
-
-    # 7. Output instructions
-    click.echo("")
-    click.echo("=" * 60)
-    click.echo("SESSION ROLLOVER COMPLETE")
-    click.echo("=" * 60)
-    click.echo("")
-    click.echo("To continue in a new session, run:")
-    click.echo(f"  claude --prompt-file {prompt_file}")
-    click.echo("")
-    click.echo("Or to resume from the prompt manually, copy the content from:")
-    click.echo(f"  {prompt_file}")
 
 
 def cmd_send(issue: str, message: str, msg_type: str = "info"):
@@ -3402,8 +3236,18 @@ end tell
         ], check=True)
 
 
-def run_here(input_str: str, description: Optional[str] = None):
-    """Run worker in current terminal."""
+def run_here(
+    input_str: str,
+    description: Optional[str] = None,
+    repo_override: Optional[str] = None,
+):
+    """Run worker in current terminal.
+
+    Args:
+        input_str: Issue number, URL, JIRA key, or owner/name:N / host/owner/name:N.
+        description: Optional description override.
+        repo_override: Optional owner/name or host/owner/name from --repo CLI flag.
+    """
     repo_root = get_repo_root()
     if not repo_root:
         raise click.ClickException("Not in a git repository")
@@ -3411,17 +3255,18 @@ def run_here(input_str: str, description: Optional[str] = None):
     # Use main repo name for worktree paths to avoid nesting worktrees
     # (e.g., when running from inside an existing worktree)
     repo_name = get_main_repo_name() or repo_root.name
-    gh_cli = detect_gh_cli(input_str)  # Pass URL to detect correct CLI for forks
 
     # Parse input
     issue_number: Optional[int] = None
     issue_owner: Optional[str] = None
     issue_repo: Optional[str] = None
+    issue_host: Optional[str] = None
     issue_type: Optional[str] = None
-    target_repo: Optional[str] = None  # owner/repo for gh commands (supports forks)
+    target_repo: Optional[str] = None  # [host/]owner/repo for gh commands
     jira_key: Optional[str] = None
     branch_name: Optional[str] = None
     issue_source = "github"
+    gh_cli: Optional[str] = None  # Set in each code path below
 
     # Try JIRA first (if acli available), then GitHub
     jira_key = parse_jira_key(input_str)
@@ -3447,38 +3292,54 @@ def run_here(input_str: str, description: Optional[str] = None):
     else:
         jira_key = None  # Reset if acli not available
 
-        # Try GitHub URL/number parsing
+        # Try GitHub URL first (overrides remote detection)
         parsed = parse_github_url(input_str)
         if parsed:
             issue_owner = parsed.owner
             issue_repo = parsed.repo
             issue_type = parsed.issue_type
             issue_number = parsed.number
-            # Use the URL's repo for all operations (supports forks)
-        elif input_str.isdigit():
-            issue_number = int(input_str)
-            issue_type = "issues"
-            # Get owner/repo from remote
-            try:
-                result = subprocess.run(
-                    ["git", "remote", "get-url", "origin"],
-                    capture_output=True, text=True, check=True
-                )
-                match = re.search(r'github(?:\.netflix)?\.(?:com|net)[:/]([^/]+)/([^/.\s]+)', result.stdout)
-                if match:
-                    issue_owner = match.group(1)
-                    issue_repo = match.group(2).replace('.git', '')
-            except subprocess.CalledProcessError:
-                pass
+            # Extract host from URL for target_repo prefix
+            url_host_match = re.match(r'https?://(?:www\.)?([^/]+)', input_str)
+            if url_host_match:
+                issue_host = url_host_match.group(1)
         else:
-            # Treat as feature description
-            description = input_str
+            # Support owner/name:N and host/owner/name:N inline prefixes
+            issue_token, inline_repo = parse_issue_arg(input_str)
+            # CLI --repo flag wins over inline prefix
+            effective_repo = repo_override or inline_repo
+
+            if issue_token.isdigit():
+                issue_number = int(issue_token)
+                issue_type = "issues"
+                # Resolve host/owner/repo from flag, env, or remotes
+                resolved = resolve_target_repo(
+                    gh_host=os.environ.get("GH_HOST"),
+                    explicit_repo=effective_repo,
+                )
+                if resolved:
+                    issue_host, issue_owner, issue_repo = resolved
+            elif effective_repo:
+                raise click.ClickException(
+                    f"--repo or 'repo:' prefix requires a numeric issue "
+                    f"number, got: {issue_token!r}"
+                )
+            else:
+                # Treat as feature description
+                description = input_str
 
         # Find or create branch for GitHub issue
         if issue_number:
             click.echo(f"Found GitHub {issue_type}: #{issue_number}")
-            # Build target repo string for gh commands (supports forks)
-            target_repo = f"{issue_owner}/{issue_repo}" if issue_owner and issue_repo else None
+            # Build target repo with host prefix so gh disambiguates correctly
+            if issue_owner and issue_repo:
+                if issue_host:
+                    target_repo = f"{issue_host}/{issue_owner}/{issue_repo}"
+                else:
+                    target_repo = f"{issue_owner}/{issue_repo}"
+
+            # Pick the gh binary based on the resolved host (not just origin)
+            gh_cli = detect_gh_cli(f"https://{issue_host}/" if issue_host else None)
 
             if issue_type == "pull":
                 # For PRs, fetch the branch name
@@ -3506,6 +3367,11 @@ def run_here(input_str: str, description: Optional[str] = None):
             # Feature branch
             branch_name = f"feature-{slugify(description)}"
             click.echo(f"Will create feature branch: {branch_name}")
+
+    # Fall back to remote-based CLI detection for JIRA/description paths
+    # where no GitHub host was resolved above.
+    if gh_cli is None:
+        gh_cli = detect_gh_cli(input_str)
 
     if not branch_name:
         raise click.ClickException("Could not determine branch name")
@@ -3565,10 +3431,13 @@ def run_here(input_str: str, description: Optional[str] = None):
     if issue_source == "jira" and jira_key:
         task_ref = f"JIRA issue {jira_key} (https://netflix.atlassian.net/browse/{jira_key})"
     elif issue_number and issue_owner and issue_repo:
-        if issue_type == "pull":
-            task_ref = f"GitHub PR https://github.com/{issue_owner}/{issue_repo}/pull/{issue_number}"
-        else:
-            task_ref = f"GitHub issue https://github.com/{issue_owner}/{issue_repo}/issues/{issue_number}"
+        host_for_url = issue_host or "github.com"
+        kind = "pull" if issue_type == "pull" else "issues"
+        label = "PR" if issue_type == "pull" else "issue"
+        task_ref = (
+            f"GitHub {label} https://{host_for_url}/{issue_owner}/"
+            f"{issue_repo}/{kind}/{issue_number}"
+        )
     elif issue_number:
         task_ref = f"Issue #{issue_number}"
     else:
@@ -3600,7 +3469,6 @@ def run_here(input_str: str, description: Optional[str] = None):
         jira_key,
         issue_source
     )
-    db_create_session(worker_id=worker_id, session_number=1)
     db_log_event(worker_id, "started", f"Worker started for {task_ref}")
     db_update_status(worker_id, "running", "implementation")
 
