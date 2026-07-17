@@ -25,6 +25,7 @@ import signal
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 from contextlib import contextmanager
@@ -2268,7 +2269,7 @@ If issues found: Write "ISSUES_FOUND" on its own line.
 ```
 """
 
-    # Run claude --print for synchronous review (or use mock for dry-run)
+    # Run codex for synchronous review (or use mock for dry-run)
     click.echo(f"Running {review_type} review...")
 
     if dry_run:
@@ -2278,16 +2279,31 @@ If issues found: Write "ISSUES_FOUND" on its own line.
         else:
             output = "### Summary\nDry-run review of code changes.\n\n### Axes\n- PASS correctness: no issues found\n- FAIL security: [HIGH] example.py:42 - Potential null pointer dereference\n- PASS claude_md_compliance: no issues found\n- FAIL error_handling: [MEDIUM] utils.py:10 - Missing error handling\n- PASS breaking_changes: no issues found\n\n### Issues\n- [HIGH] example.py:42 - Potential null pointer dereference\n- [MEDIUM] utils.py:10 - Missing error handling\n\n### Verdict\nISSUES_FOUND"
     else:
-        # Unset CLAUDECODE to allow claude --print from within a worker session.
-        # --print is non-interactive (one-shot API call), so nested session concerns don't apply.
-        env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
-        result = subprocess.run(
-            ["claude", "--print"],
-            capture_output=True, text=True,
-            input=prompt,  # Pipe via stdin so large diffs don't blow ARG_MAX
-            env=env,
-        )
-        output = result.stdout
+        # Run codex non-interactively for a read-only review. The prompt is piped
+        # via stdin ("-") so large diffs don't blow ARG_MAX. codex exec streams its
+        # session to stdout, so capture just the final agent message via
+        # --output-last-message to keep the stored review clean.
+        fd, last_msg_path = tempfile.mkstemp(suffix=".txt")
+        os.close(fd)
+        try:
+            result = subprocess.run(
+                [
+                    "codex", "exec",
+                    "--sandbox", "read-only",
+                    "--skip-git-repo-check",
+                    "--color", "never",
+                    "--output-last-message", last_msg_path,
+                    "-",
+                ],
+                capture_output=True, text=True,
+                input=prompt,
+            )
+            output = Path(last_msg_path).read_text()
+        finally:
+            Path(last_msg_path).unlink(missing_ok=True)
+        # Fall back to full stdout/stderr if the final message wasn't captured.
+        if not output.strip():
+            output = result.stdout
         if not output.strip() and result.stderr:
             output = f"[Review command stderr]\n{result.stderr}"
         if result.returncode != 0 and not output.strip():
