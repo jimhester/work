@@ -31,18 +31,13 @@ SQLite database with four tables:
 
 ### Hook System
 
-Two Claude Code hooks installed via `hooks/install-hooks.sh`:
+Claude Code hooks installed via `hooks/install-hooks.sh`, including:
 
 1. **`work-stage-detector.sh`** (PostToolUse): Monitors Bash commands to auto-detect:
    - PR creation (`gh pr create`) → sets stage to `ci_waiting`
    - CI passing (`gh pr checks`) → sets stage to `review_waiting`
    - PR merge (`gh pr merge`) → sets stage to `done`
    - Merge conflicts → sets stage to `merge_conflicts`
-
-2. **`work-review-guard.sh`** (PreToolUse): Blocks PR operations unless:
-   - `.work-review-status` file exists in repo root
-   - File is newer than last commit
-   - File contains "APPROVED"
 
 ### Worker Stages
 
@@ -73,9 +68,6 @@ Hooks require: `jq`, `sqlite3`
 ### Testing Hooks
 
 ```bash
-# Test the review guard hook
-./hooks/test-review-hook.sh
-
 # Manually install hooks
 ./hooks/install-hooks.sh
 ```

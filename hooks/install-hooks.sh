@@ -3,7 +3,7 @@
 #
 # This script:
 # 1. Creates the ~/.claude/hooks directory
-# 2. Symlinks work-stage-detector.sh (PostToolUse) and work-review-guard.sh (PreToolUse)
+# 2. Symlinks the work hook scripts (stage detection, session end, worktrees, stop failure)
 # 3. Updates ~/.claude/settings.json with hook configuration
 
 set -euo pipefail
@@ -76,7 +76,6 @@ install_single_hook() {
 # Install all hook scripts
 install_hooks() {
     install_single_hook "work-stage-detector.sh"
-    install_single_hook "work-review-guard.sh"
     install_single_hook "work-session-end.sh"
     install_single_hook "work-worktree-create.sh"
     install_single_hook "work-worktree-remove.sh"
@@ -85,7 +84,7 @@ install_hooks() {
 
 # Add or update a hook in settings.json
 configure_hook() {
-    local hook_type="$1"  # PreToolUse or PostToolUse
+    local hook_type="$1"  # e.g. PostToolUse, SessionEnd
     local hook_name="$2"
     local hook_config="$3"
 
@@ -134,19 +133,6 @@ update_settings() {
         ]
     }'
     configure_hook "PostToolUse" "work-stage-detector" "$post_hook_config"
-
-    # PreToolUse: work-review-guard.sh (blocks PR create/merge without review)
-    local pre_hook_config='{
-        "matcher": "Bash",
-        "hooks": [
-            {
-                "type": "command",
-                "command": "~/.claude/hooks/work-review-guard.sh",
-                "timeout": 5000
-            }
-        ]
-    }'
-    configure_hook "PreToolUse" "work-review-guard" "$pre_hook_config"
 
     # SessionEnd: work-session-end.sh (marks worker as done on session exit)
     local session_end_hook_config='{
@@ -222,10 +208,6 @@ main() {
     echo "    - Tracks CI status changes (gh pr checks)"
     echo "    - Detects PR merges (gh pr merge)"
     echo "    - Detects merge conflicts (git rebase/merge)"
-    echo ""
-    echo "  work-review-guard.sh (PreToolUse):"
-    echo "    - Blocks PR creation without passing 'work --review'"
-    echo "    - Blocks PR merge without passing 'work --review --pre-merge'"
     echo ""
     echo "  work-session-end.sh (SessionEnd):"
     echo "    - Marks worker as done when session exits (Ctrl-C, /exit, tab close)"

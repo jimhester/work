@@ -15,18 +15,14 @@ worker_guidelines = """
 # Run the main script (uv handles dependencies automatically)
 ./work <issue-number>
 
-# Test the review guard hook
-./hooks/test-review-hook.sh
-
 # Install hooks
 ./hooks/install-hooks.sh
 ```
 
 ### Validation Order Before Committing
 1. Ensure Python syntax is valid (no syntax errors in `work` script)
-2. Test hook scripts with `./hooks/test-review-hook.sh`
-3. Verify shell scripts have correct syntax: `bash -n <script.sh>`
-4. Test basic CLI operations: `./work --help`, `./work --status`
+2. Verify shell scripts have correct syntax: `bash -n <script.sh>`
+3. Test basic CLI operations: `./work --help`, `./work --status`
 
 ### Project Conventions
 - The `work` script uses inline uv script metadata (`uv run --script`)
@@ -73,7 +69,6 @@ review_guidelines = """
 
 ### Hook System
 - [ ] PostToolUse hooks don't block execution unnecessarily
-- [ ] PreToolUse hooks provide clear error messages when blocking
 - [ ] Stage transitions follow valid stage progression
 - [ ] `.work-review-status` file handling is correct
 

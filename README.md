@@ -49,10 +49,9 @@ will generate project-specific worker and review guidelines from it.
 
 ### Review and merge
 
-Workers are blocked from creating PRs or merging until they pass a self-review
-(`work --review`). This is enforced by a PreToolUse hook that checks for an
-`APPROVED` marker file in the repo root. The review itself runs a diff-based
-checklist that can be customized in `.work.toml`.
+Workers can run an optional self-review (`work --review`) before creating a PR
+or merging. The review runs a diff-based checklist that can be customized in
+`.work.toml`; nothing blocks PR operations on its result.
 
 ```
 ./work --review                   # self-review before PR
@@ -85,16 +84,12 @@ the prompt), review checklists, review strictness, and context thresholds.
 
 ## How the hooks work
 
-Two Claude Code hooks get installed into `~/.claude/hooks/`:
+Claude Code hooks get installed into `~/.claude/hooks/`, including:
 
 **Stage detector** (PostToolUse) watches Bash output for patterns like
 `gh pr create`, `gh pr checks`, `gh pr merge`, and merge conflicts. When it
 sees one, it updates the worker's stage in the database. It also checks for
 pending messages and monitors context usage.
-
-**Review guard** (PreToolUse) blocks `gh pr create` and `gh pr merge` unless
-a `.work-review-status` file exists, is newer than the last commit, and
-contains "APPROVED".
 
 ## Project layout
 
